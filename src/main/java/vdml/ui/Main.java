@@ -3,8 +3,8 @@ package vdml.ui;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Dimension;
-import java.awt.Font;
 import java.awt.FlowLayout;
+import java.awt.Font;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
@@ -15,18 +15,18 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import javax.swing.AbstractAction;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
-import javax.swing.AbstractAction;
 import javax.swing.DefaultComboBoxModel;
 import javax.swing.JButton;
-import javax.swing.JLabel;
+import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
-import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JFileChooser;
 import javax.swing.JFrame;
+import javax.swing.JLabel;
 import javax.swing.JMenu;
 import javax.swing.JMenuBar;
 import javax.swing.JMenuItem;
@@ -35,19 +35,25 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
 import javax.swing.JTextArea;
-import javax.swing.SwingWorker;
 import javax.swing.KeyStroke;
 import javax.swing.SwingUtilities;
+import javax.swing.SwingWorker;
 import javax.swing.filechooser.FileNameExtensionFilter;
 
-import vdml.io.JsonIO;
 import vdml.io.DiagramPdfExporter;
+import vdml.io.JsonIO;
 import vdml.model.DiagramModel;
 import vdml.model.EntityDef;
 import vdml.validation.DesignValidator;
 import vdml.validation.DesignValidator.Report;
 import vdml.vhdl.VhdlEmitter;
 
+/**
+ * Main window for the vdml editor. It shares {@link DiagramModel} between
+ * {@link DiagramCanvas}, {@link TopLevelPanel}, and {@link TopLevelOptionsPanel},
+ * and coordinates file I/O and validation through {@link JsonIO} and
+ * {@link DesignValidator}.
+ */
 public class Main {
     private final DiagramModel model = new DiagramModel();
     private final DiagramCanvas canvas = new DiagramCanvas(model);
@@ -235,11 +241,11 @@ public class Main {
     }
 
     private void toggleToolsPane() {
-        if (detachedToolsFrame == null) {
-            detachToolsPane();
-        } else {
+        if (detachedToolsFrame != null) {
             dockToolsPane();
+            return;
         }
+        detachToolsPane();
     }
 
     private void detachToolsPane() {
@@ -332,7 +338,7 @@ public class Main {
     }
 
     private void open() {
-        JFileChooser chooser = chooser();
+        JFileChooser chooser = createDiagramFileChooser();
         if (chooser.showOpenDialog(frame) != JFileChooser.APPROVE_OPTION) {
             return;
         }
@@ -348,7 +354,7 @@ public class Main {
     }
 
     private void save() {
-        JFileChooser chooser = chooser();
+        JFileChooser chooser = createDiagramFileChooser();
         if (currentFile != null) {
             chooser.setSelectedFile(currentFile);
         }
@@ -368,13 +374,17 @@ public class Main {
         }
     }
 
-    private JFileChooser chooser() {
+    private JFileChooser createDiagramFileChooser() {
         JFileChooser chooser = new JFileChooser(currentFile == null ? new File(".") : currentFile.getParentFile());
         chooser.setFileFilter(new FileNameExtensionFilter("Diagram (*.dgm.json, *.json)", "json"));
         return chooser;
     }
 
     private void emitToStdout() {
+        showGeneratedVhdl(buildGeneratedVhdl());
+    }
+
+    private String buildGeneratedVhdl() {
         String pkg = VhdlEmitter.emitComponentsPackage(model);
         String arch = VhdlEmitter.emitStructuralArchitecture(model);
         System.out.println("-- components_pkg.vhd\n" + pkg);
@@ -385,8 +395,11 @@ public class Main {
         }
         System.out.println("-- " + model.getTopEntity() + ".vhd\n" + arch);
         generated.append(arch);
+        return generated.toString();
+    }
 
-        JTextArea area = new JTextArea(generated.toString(), 30, 90);
+    private void showGeneratedVhdl(String generated) {
+        JTextArea area = new JTextArea(generated, 30, 90);
         area.setEditable(false);
         area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         JScrollPane pane = new JScrollPane(area);
@@ -395,44 +408,47 @@ public class Main {
     }
 
     private void exportVhdl() {
-        JFileChooser chooser = new JFileChooser(currentFile == null ? new File(".") : currentFile.getParentFile());
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        chooser.setDialogTitle("Choose output directory");
+        JFileChooser chooser = createVhdlExportChooser();
         if (chooser.showSaveDialog(frame) != JFileChooser.APPROVE_OPTION) {
             return;
         }
 
         Path dir = chooser.getSelectedFile().toPath();
         try {
-            Files.writeString(dir.resolve("components_pkg.vhd"), VhdlEmitter.emitComponentsPackage(model),
-                    StandardCharsets.UTF_8);
-            var standardFiles = VhdlEmitter.emitStandardLibraryFiles(model);
-            for (var file : standardFiles.entrySet()) {
-                Files.writeString(dir.resolve(file.getKey()), file.getValue(), StandardCharsets.UTF_8);
-            }
-            Files.writeString(dir.resolve(model.getTopEntity() + ".vhd"), VhdlEmitter.emitStructuralArchitecture(model),
-                    StandardCharsets.UTF_8);
-            String standardSummary = standardFiles.isEmpty() ? "" : " plus "
-                    + standardFiles.size() + " standard library source file(s)";
-            JOptionPane.showMessageDialog(frame, "Wrote components_pkg.vhd and " + model.getTopEntity()
-                    + ".vhd" + standardSummary + " to\n" + dir);
+            writeVhdlFiles(dir);
         } catch (IOException ex) {
             error("Could not write VHDL: " + ex.getMessage());
         }
     }
 
-    private void exportPdf() {
+    private JFileChooser createVhdlExportChooser() {
         JFileChooser chooser = new JFileChooser(currentFile == null ? new File(".") : currentFile.getParentFile());
-        chooser.setDialogTitle("Export diagram to PDF");
-        chooser.setFileFilter(new FileNameExtensionFilter("PDF document (*.pdf)", "pdf"));
-        chooser.setSelectedFile(new File("diagram.pdf"));
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setDialogTitle("Choose output directory");
+        return chooser;
+    }
+
+    private void writeVhdlFiles(Path dir) throws IOException {
+        Files.writeString(dir.resolve("components_pkg.vhd"), VhdlEmitter.emitComponentsPackage(model),
+                StandardCharsets.UTF_8);
+        var standardFiles = VhdlEmitter.emitStandardLibraryFiles(model);
+        for (var file : standardFiles.entrySet()) {
+            Files.writeString(dir.resolve(file.getKey()), file.getValue(), StandardCharsets.UTF_8);
+        }
+        Files.writeString(dir.resolve(model.getTopEntity() + ".vhd"),
+                VhdlEmitter.emitStructuralArchitecture(model), StandardCharsets.UTF_8);
+        String standardSummary = standardFiles.isEmpty() ? "" : " plus "
+                + standardFiles.size() + " standard library source file(s)";
+        JOptionPane.showMessageDialog(frame, "Wrote components_pkg.vhd and " + model.getTopEntity()
+                + ".vhd" + standardSummary + " to\n" + dir);
+    }
+
+    private void exportPdf() {
+        JFileChooser chooser = createPdfExportChooser();
         if (chooser.showSaveDialog(frame) != JFileChooser.APPROVE_OPTION) {
             return;
         }
-        File file = chooser.getSelectedFile();
-        if (!file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) {
-            file = new File(file.getParentFile(), file.getName() + ".pdf");
-        }
+        File file = ensurePdfExtension(chooser.getSelectedFile());
         try {
             DiagramPdfExporter.export(canvas, file.toPath());
             JOptionPane.showMessageDialog(frame, "Diagram exported to " + file.getName(),
@@ -440,6 +456,21 @@ public class Main {
         } catch (IOException ex) {
             error("Could not export PDF: " + ex.getMessage());
         }
+    }
+
+    private JFileChooser createPdfExportChooser() {
+        JFileChooser chooser = new JFileChooser(currentFile == null ? new File(".") : currentFile.getParentFile());
+        chooser.setDialogTitle("Export diagram to PDF");
+        chooser.setFileFilter(new FileNameExtensionFilter("PDF document (*.pdf)", "pdf"));
+        chooser.setSelectedFile(new File("diagram.pdf"));
+        return chooser;
+    }
+
+    private File ensurePdfExtension(File file) {
+        if (file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) {
+            return file;
+        }
+        return new File(file.getParentFile(), file.getName() + ".pdf");
     }
 
     private void modelChanged() {
@@ -531,27 +562,41 @@ public class Main {
         if (latestValidationReport == null) {
             refreshLiveValidation();
         }
-        JFileChooser chooser = new JFileChooser(currentFile == null ? new File(".") : currentFile.getParentFile());
-        chooser.setDialogTitle("Save validation report");
-        chooser.setFileFilter(new FileNameExtensionFilter("Text report (*.txt)", "txt"));
-        chooser.setSelectedFile(new File("vdml-validation-report.txt"));
+        JFileChooser chooser = createReportSaveChooser();
         if (chooser.showSaveDialog(frame) != JFileChooser.APPROVE_OPTION) {
             return;
         }
-        File file = chooser.getSelectedFile();
-        if (!file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".txt")) {
-            file = new File(file.getParentFile(), file.getName() + ".txt");
-        }
-        String report = latestValidationReport.toText();
-        if (latestReportStale) {
-            report += "\nNOTE: The design changed while this report was being generated. Run validation again for the current design.\n";
-        }
+        File file = ensureTextReportExtension(chooser.getSelectedFile());
+        String report = buildLatestReportText();
         try {
             Files.writeString(file.toPath(), report, StandardCharsets.UTF_8);
             statusBar.setText("Saved validation report: " + file.getName());
         } catch (IOException ex) {
             error("Could not save validation report: " + ex.getMessage());
         }
+    }
+
+    private JFileChooser createReportSaveChooser() {
+        JFileChooser chooser = new JFileChooser(currentFile == null ? new File(".") : currentFile.getParentFile());
+        chooser.setDialogTitle("Save validation report");
+        chooser.setFileFilter(new FileNameExtensionFilter("Text report (*.txt)", "txt"));
+        chooser.setSelectedFile(new File("vdml-validation-report.txt"));
+        return chooser;
+    }
+
+    private File ensureTextReportExtension(File file) {
+        if (file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".txt")) {
+            return file;
+        }
+        return new File(file.getParentFile(), file.getName() + ".txt");
+    }
+
+    private String buildLatestReportText() {
+        String report = latestValidationReport.toText();
+        if (latestReportStale) {
+            report += "\nNOTE: The design changed while this report was being generated. Run validation again for the current design.\n";
+        }
+        return report;
     }
 
     private void error(String message) {

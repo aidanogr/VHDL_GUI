@@ -110,6 +110,11 @@ public class DiagramCanvas extends JComponent {
     private int resizeStartHeight;
     private int resizeStartStoredHeight;
     private boolean resizeMoved;
+    private Wire labelDragWire;
+    private Point labelDragStartMouse;
+    private Point labelDragStartPosition;
+    private Point labelDragPosition;
+    private boolean labelDragMoved;
     private Wire routeDragWire;
     private Point routeDragStartMouse;
     private List<Point> routeDragStartPoints;
@@ -125,6 +130,7 @@ public class DiagramCanvas extends JComponent {
         this.model = model;
         setFocusable(true);
         setOpaque(true);
+        setAutoscrolls(true);
         model.addChangeListener(this::onModelChanged);
         installMouse();
         installMouseWheel();
@@ -335,6 +341,11 @@ public class DiagramCanvas extends JComponent {
                     resizeBlock.setSize(width, height);
                     resizeMoved = width != resizeStartWidth || height != resizeStartHeight;
                     updatePreferredSize();
+                } else if (labelDragWire != null) {
+                    labelDragPosition = new Point(
+                            labelDragStartPosition.x + p.x - labelDragStartMouse.x,
+                            labelDragStartPosition.y + p.y - labelDragStartMouse.y);
+                    labelDragMoved = !labelDragPosition.equals(labelDragStartPosition);
                 } else if (dragBlockStartPositions != null) {
                     int dx = p.x - dragBlockStartMouse.x;
                     int dy = p.y - dragBlockStartMouse.y;
@@ -346,7 +357,6 @@ public class DiagramCanvas extends JComponent {
                         }
                     }
                     dragMoved = dx != 0 || dy != 0;
-                    updatePreferredSize();
                 } else if (routeDragWire != null) {
                     routeDragPoints = movedSegment(routeDragStartPoints, routeDragSegment,
                             p.x - routeDragStartMouse.x, p.y - routeDragStartMouse.y);
@@ -363,15 +373,17 @@ public class DiagramCanvas extends JComponent {
                 hover = now;
                 Block block = blockAt(mouse);
                 boolean overResize = block != null && isResizeHandle(block, mouse);
-                Wire wire = now == null && !overResize ? wireAt(mouse) : null;
+                Wire labelWire = now == null && !overResize ? signalLabelAt(mouse) : null;
+                Wire wire = now == null && !overResize && labelWire == null ? wireAt(mouse) : null;
                 if (wire != null) {
                     block = null;
                 }
                 int draggableSegment = wire == null ? -1 : draggableWireSegmentAt(wire, mouse);
-                boolean overWire = wire != null;
+                boolean overWire = wire != null || labelWire != null;
                 boolean overBlock = now == null && block != null;
                 int cursor = marqueeActive ? java.awt.Cursor.CROSSHAIR_CURSOR
                         : overResize ? java.awt.Cursor.SE_RESIZE_CURSOR
+                        : labelWire != null ? java.awt.Cursor.MOVE_CURSOR
                         : overWire ? draggableSegment >= 0 ? wireSegmentCursor(wire, draggableSegment)
                                 : java.awt.Cursor.HAND_CURSOR
                         : overBlock ? java.awt.Cursor.MOVE_CURSOR
@@ -412,9 +424,14 @@ public class DiagramCanvas extends JComponent {
             }
             resizeStartMouse = null;
             resizeMoved = false;
+        } else if (labelDragWire != null) {
+            finishSignalLabelDrag();
         } else if (dragBlockStartPositions == null) {
             finishWireDrag();
         } else {
+            boolean moved = dragMoved;
+            Map<String, List<Wire.Waypoint>> updatedWaypoints =
+                    moved ? movedBlockWireWaypoints() : Map.of();
             Map<String, Point> destinations = new LinkedHashMap<>();
             for (Map.Entry<String, Point> entry : dragBlockStartPositions.entrySet()) {
                 Block block = model.getBlock(entry.getKey());
@@ -425,12 +442,78 @@ public class DiagramCanvas extends JComponent {
             }
             dragBlockStartPositions = null;
             dragBlockStartMouse = null;
-            if (dragMoved) {
-                model.moveBlocks(destinations);
+            if (moved) {
+                model.moveBlocks(destinations, updatedWaypoints);
             }
             dragMoved = false;
         }
         repaint();
+    }
+
+    private void finishSignalLabelDrag() {
+        Wire wire = labelDragWire;
+        Point position = labelDragPosition;
+        boolean moved = labelDragMoved;
+        labelDragWire = null;
+        labelDragStartMouse = null;
+        labelDragStartPosition = null;
+        labelDragPosition = null;
+        labelDragMoved = false;
+        if (moved) {
+            String error = model.updateWireLabelPosition(wire.id(), position.x, position.y);
+            if (error != null) {
+                showError(error);
+            }
+        }
+    }
+
+    private Map<String, List<Wire.Waypoint>> movedBlockWireWaypoints() {
+        Map<String, List<Wire.Waypoint>> updated = new LinkedHashMap<>();
+        for (Wire wire : model.getWires()) {
+            if (wire.waypoints() == null || wire.waypoints().isEmpty()
+                    || !hasMovedEndpoint(wire)) {
+                continue;
+            }
+            List<Point> points = routePoints(wire);
+            if (points != null) {
+                updated.put(wire.id(), interiorWaypoints(points));
+            }
+        }
+        return updated;
+    }
+
+    private boolean hasMovedEndpoint(Wire wire) {
+        return hasMovedBlock(wire.fromBlock()) || hasMovedBlock(wire.toBlock());
+    }
+
+    private boolean hasMovedBlock(String blockId) {
+        Point start = dragBlockStartPositions.get(blockId);
+        Block block = model.getBlock(blockId);
+        return start != null && block != null
+                && (start.x != block.getX() || start.y != block.getY());
+    }
+
+    private Point waypointOffset(Wire wire) {
+        Point fromOffset = blockDragOffset(wire.fromBlock());
+        Point toOffset = blockDragOffset(wire.toBlock());
+        boolean fromMoved = fromOffset.x != 0 || fromOffset.y != 0;
+        boolean toMoved = toOffset.x != 0 || toOffset.y != 0;
+        if (fromMoved && toMoved) {
+            return new Point((fromOffset.x + toOffset.x) / 2, (fromOffset.y + toOffset.y) / 2);
+        }
+        if (fromMoved) {
+            return fromOffset;
+        }
+        return toOffset;
+    }
+
+    private Point blockDragOffset(String blockId) {
+        Point start = dragBlockStartPositions.get(blockId);
+        Block block = model.getBlock(blockId);
+        if (start == null || block == null) {
+            return new Point();
+        }
+        return new Point(block.getX() - start.x, block.getY() - start.y);
     }
 
     private void finishMarquee() {
@@ -588,6 +671,31 @@ public class DiagramCanvas extends JComponent {
             resizeStartStoredHeight = blockUnderPointer.getHeight();
             resizeMoved = false;
             status.accept("Drag the corner handle to resize this block.");
+            return;
+        }
+
+        Wire labelWire = signalLabelAt(p);
+        if (labelWire != null) {
+            if (e.isShiftDown() || e.isControlDown()) {
+                toggleWireSelection(labelWire.id());
+                return;
+            }
+            if (!selectedWireIds.contains(labelWire.id())) {
+                select(null, labelWire.id());
+            } else if (selectedWireId == null) {
+                selectedWireId = labelWire.id();
+            }
+            if (e.getClickCount() >= 2) {
+                renameWire(labelWire);
+                return;
+            }
+            int[][] points = route(labelWire);
+            labelDragWire = labelWire;
+            labelDragStartMouse = p;
+            labelDragStartPosition = wireLabelPosition(labelWire, points);
+            labelDragPosition = new Point(labelDragStartPosition);
+            labelDragMoved = false;
+            status.accept("Drag the signal label to reposition it.");
             return;
         }
 
@@ -800,48 +908,84 @@ public class DiagramCanvas extends JComponent {
             return;
         }
 
-        List<Point> updated = new ArrayList<>(points.subList(0, segment + 1));
+        int center;
         if (a.y == b.y) {
             int low = Math.min(a.x, b.x);
-            int center = Math.max(low + halfSpan, Math.min(Math.max(a.x, b.x) - halfSpan, location.x));
-            int left = center - halfSpan;
-            int right = center + halfSpan;
-            if (a.x < b.x) {
-                updated.add(new Point(left, a.y));
-                updated.add(new Point(left, a.y + GRID));
-                updated.add(new Point(right, a.y + GRID));
-                updated.add(new Point(right, a.y));
-            } else {
-                updated.add(new Point(right, a.y));
-                updated.add(new Point(right, a.y + GRID));
-                updated.add(new Point(left, a.y + GRID));
-                updated.add(new Point(left, a.y));
-            }
+            center = clampBreakpointCenter(location.x, low, Math.max(a.x, b.x), halfSpan);
         } else {
             int low = Math.min(a.y, b.y);
-            int center = Math.max(low + halfSpan, Math.min(Math.max(a.y, b.y) - halfSpan, location.y));
-            int top = center - halfSpan;
-            int bottom = center + halfSpan;
-            if (a.y < b.y) {
-                updated.add(new Point(a.x, top));
-                updated.add(new Point(a.x + GRID, top));
-                updated.add(new Point(a.x + GRID, bottom));
-                updated.add(new Point(a.x, bottom));
-            } else {
-                updated.add(new Point(a.x, bottom));
-                updated.add(new Point(a.x + GRID, bottom));
-                updated.add(new Point(a.x + GRID, top));
-                updated.add(new Point(a.x, top));
-            }
+            center = clampBreakpointCenter(location.y, low, Math.max(a.y, b.y), halfSpan);
         }
-        updated.addAll(points.subList(segment + 1, points.size()));
-        List<Point> normalized = normalizeRoute(updated);
+
+        List<Point> positive = createBreakpointRoute(points, segment, center, halfSpan, GRID);
+        List<Point> negative = createBreakpointRoute(points, segment, center, halfSpan, -GRID);
+        long positiveScore = routeScore(positive, 0);
+        long negativeScore = containsNegativeCoordinate(negative) ? Long.MAX_VALUE : routeScore(negative, 0);
+        List<Point> normalized = negativeScore < positiveScore ? negative : positive;
         String error = model.updateWireWaypoints(wire.id(), interiorWaypoints(normalized));
         if (error != null) {
             showError(error);
         } else {
-            status.accept("Breakpoint added. Drag wire segments to adjust it; redundant bends merge automatically.");
+            status.accept("Breakpoint added. Its direction avoids nearby blocks where possible; drag to adjust it.");
         }
+    }
+
+    private int clampBreakpointCenter(int coordinate, int low, int high, int halfSpan) {
+        int minimum = low + halfSpan;
+        int maximum = high - halfSpan;
+        int firstGridPoint = ((minimum + GRID - 1) / GRID) * GRID;
+        int lastGridPoint = (maximum / GRID) * GRID;
+        if (firstGridPoint <= lastGridPoint) {
+            return Math.max(firstGridPoint, Math.min(lastGridPoint, snap(coordinate)));
+        }
+        return Math.max(minimum, Math.min(maximum, coordinate));
+    }
+
+    private List<Point> createBreakpointRoute(List<Point> points, int segment, int center,
+                                               int halfSpan, int offset) {
+        Point a = points.get(segment);
+        Point b = points.get(segment + 1);
+        List<Point> updated = new ArrayList<>(points.subList(0, segment + 1));
+        if (a.y == b.y) {
+            int left = center - halfSpan;
+            int right = center + halfSpan;
+            if (a.x < b.x) {
+                updated.add(new Point(left, a.y));
+                updated.add(new Point(left, a.y + offset));
+                updated.add(new Point(right, a.y + offset));
+                updated.add(new Point(right, a.y));
+            } else {
+                updated.add(new Point(right, a.y));
+                updated.add(new Point(right, a.y + offset));
+                updated.add(new Point(left, a.y + offset));
+                updated.add(new Point(left, a.y));
+            }
+        } else {
+            int top = center - halfSpan;
+            int bottom = center + halfSpan;
+            if (a.y < b.y) {
+                updated.add(new Point(a.x, top));
+                updated.add(new Point(a.x + offset, top));
+                updated.add(new Point(a.x + offset, bottom));
+                updated.add(new Point(a.x, bottom));
+            } else {
+                updated.add(new Point(a.x, bottom));
+                updated.add(new Point(a.x + offset, bottom));
+                updated.add(new Point(a.x + offset, top));
+                updated.add(new Point(a.x, top));
+            }
+        }
+        updated.addAll(points.subList(segment + 1, points.size()));
+        return normalizeRoute(updated);
+    }
+
+    private boolean containsNegativeCoordinate(List<Point> points) {
+        for (Point point : points) {
+            if (point.x < 0 || point.y < 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void renameWire(Wire wire) {
@@ -965,7 +1109,7 @@ public class DiagramCanvas extends JComponent {
                 maxX = Math.max(maxX, point[0]);
                 maxY = Math.max(maxY, point[1]);
             }
-            Point label = wireLabelPosition(points);
+            Point label = wireLabelPosition(wire, points);
             int labelX = label.x + 6;
             int labelBaseline = label.y - 5;
             minY = Math.min(minY, labelBaseline - signalMetrics.getAscent());
@@ -1084,9 +1228,40 @@ public class DiagramCanvas extends JComponent {
     }
 
     private Point pinPoint(String blockId, String portName) {
-        for (Pin pin : allPins()) {
-            if (pin.blockId().equals(blockId) && pin.port().name().equals(portName)) {
-                return pin.point();
+        if (DiagramModel.TOP_ID.equals(blockId)) {
+            int inputIndex = 0;
+            int outputIndex = 0;
+            int outputX = topOutX();
+            for (Port port : model.getTopPorts()) {
+                if (port.dir() == Direction.IN) {
+                    if (port.name().equals(portName)) {
+                        return new Point(TOP_IN_X, TOP_FIRST_Y + inputIndex * TOP_ROW_H);
+                    }
+                    inputIndex++;
+                } else {
+                    if (port.name().equals(portName)) {
+                        return new Point(outputX, TOP_FIRST_Y + outputIndex * TOP_ROW_H);
+                    }
+                    outputIndex++;
+                }
+            }
+            return null;
+        }
+
+        Block block = model.getBlock(blockId);
+        EntityDef entity = block == null ? null : def(block);
+        if (entity == null) {
+            return null;
+        }
+        int inputIndex = 0;
+        int outputIndex = 0;
+        for (Port port : entity.ports()) {
+            boolean input = port.dir() == Direction.IN;
+            int row = input ? inputIndex++ : outputIndex++;
+            if (port.name().equals(portName)) {
+                int x = input ? block.getX() : block.getX() + block.getWidth();
+                int y = block.getY() + TITLE_H + row * ROW_H + ROW_H / 2;
+                return new Point(x, y);
             }
         }
         return null;
@@ -1157,16 +1332,11 @@ public class DiagramCanvas extends JComponent {
         points.add(a);
         if (w.waypoints() != null) {
             if (w.waypoints().isEmpty()) {
-                if (a.y != b.y) {
-                    int midX = a.x + (b.x - a.x) / 2;
-                    points.add(new Point(midX, a.y));
-                    points.add(new Point(midX, b.y));
-                }
-                points.add(b);
-                return normalizeRoute(points);
+                return defaultRoutePoints(a, b);
             }
+            Point offset = dragBlockStartPositions == null ? new Point() : waypointOffset(w);
             for (Wire.Waypoint waypoint : w.waypoints()) {
-                points.add(new Point(waypoint.x(), waypoint.y()));
+                points.add(new Point(waypoint.x() + offset.x, waypoint.y() + offset.y));
             }
             if (points.size() > 1 && points.get(1).y != a.y) {
                 points.add(1, new Point(points.get(1).x, a.y));
@@ -1177,6 +1347,9 @@ public class DiagramCanvas extends JComponent {
             }
             points.add(b);
             return normalizeRoute(points);
+        }
+        if (w.bendX() == null && w.bendY() == null && w.approachX() == null) {
+            return defaultRoutePoints(a, b);
         }
         int mx = w.bendX() == null ? a.x + (b.x - a.x) / 3 : w.bendX();
         int my = w.bendY() == null ? (a.y + b.y) / 2 : w.bendY();
@@ -1189,6 +1362,134 @@ public class DiagramCanvas extends JComponent {
         points.add(new Point(approachX, b.y));
         points.add(b);
         return normalizeRoute(points);
+    }
+
+    private List<Point> defaultRoutePoints(Point start, Point end) {
+        if (start.y == end.y) {
+            List<Point> direct = normalizeRoute(List.of(start, end));
+            if (routeObstacleCount(direct) == 0) {
+                return direct;
+            }
+            List<Point> best = direct;
+            long bestScore = routeScore(direct, 0);
+            int centerY = snap(start.y);
+            for (int step = 1; step <= 4; step++) {
+                int upperY = centerY - step * GRID;
+                if (upperY >= 0) {
+                    List<Point> candidate = routeWithHorizontalTrack(start, end, upperY);
+                    long score = routeScore(candidate, step * GRID);
+                    if (score < bestScore) {
+                        best = candidate;
+                        bestScore = score;
+                    }
+                }
+                List<Point> candidate = routeWithHorizontalTrack(start, end, centerY + step * GRID);
+                long score = routeScore(candidate, step * GRID);
+                if (score < bestScore) {
+                    best = candidate;
+                    bestScore = score;
+                }
+            }
+            return best;
+        }
+
+        int centerX = snap((start.x + end.x) / 2);
+        int lowX = Math.min(start.x, end.x);
+        int highX = Math.max(start.x, end.x);
+        if (centerX <= lowX || centerX >= highX) {
+            centerX = lowX + (highX - lowX) / 2;
+        }
+        List<Point> best = routeWithVerticalTrack(start, end, centerX);
+        long bestScore = routeScore(best, 0);
+        for (int step = 1; step <= 4; step++) {
+            int offset = step * GRID;
+            int leftX = centerX - offset;
+            if (leftX > lowX && leftX < highX) {
+                List<Point> candidate = routeWithVerticalTrack(start, end, leftX);
+                long score = routeScore(candidate, offset);
+                if (score < bestScore) {
+                    best = candidate;
+                    bestScore = score;
+                }
+            }
+            int rightX = centerX + offset;
+            if (rightX > lowX && rightX < highX) {
+                List<Point> candidate = routeWithVerticalTrack(start, end, rightX);
+                long score = routeScore(candidate, offset);
+                if (score < bestScore) {
+                    best = candidate;
+                    bestScore = score;
+                }
+            }
+        }
+
+        int centerY = snap((start.y + end.y) / 2);
+        List<Point> horizontalRoute = routeWithHorizontalTrack(start, end, centerY);
+        long horizontalScore = routeScore(horizontalRoute, 0);
+        if (horizontalScore < bestScore) {
+            best = horizontalRoute;
+            bestScore = horizontalScore;
+        }
+        for (int step = 1; step <= 4; step++) {
+            int offset = step * GRID;
+            int upperY = centerY - offset;
+            if (upperY >= 0) {
+                List<Point> candidate = routeWithHorizontalTrack(start, end, upperY);
+                long score = routeScore(candidate, offset);
+                if (score < bestScore) {
+                    best = candidate;
+                    bestScore = score;
+                }
+            }
+            List<Point> candidate = routeWithHorizontalTrack(start, end, centerY + offset);
+            long score = routeScore(candidate, offset);
+            if (score < bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    private List<Point> routeWithVerticalTrack(Point start, Point end, int trackX) {
+        return normalizeRoute(List.of(start, new Point(trackX, start.y),
+                new Point(trackX, end.y), end));
+    }
+
+    private List<Point> routeWithHorizontalTrack(Point start, Point end, int trackY) {
+        return normalizeRoute(List.of(start, new Point(start.x, trackY),
+                new Point(end.x, trackY), end));
+    }
+
+    private long routeScore(List<Point> points, int offset) {
+        return (long) routeObstacleCount(points) * 1_000_000L + offset;
+    }
+
+    private int routeObstacleCount(List<Point> points) {
+        int collisions = 0;
+        for (Block block : model.getBlocks()) {
+            for (int i = 0; i < points.size() - 1; i++) {
+                if (segmentIntersectsBlock(points.get(i), points.get(i + 1), block)) {
+                    collisions++;
+                }
+            }
+        }
+        return collisions;
+    }
+
+    private boolean segmentIntersectsBlock(Point start, Point end, Block block) {
+        int left = block.getX();
+        int top = block.getY();
+        int right = left + block.getWidth();
+        int bottom = top + blockHeight(block);
+        if (start.y == end.y) {
+            return start.y > top && start.y < bottom
+                    && Math.max(start.x, end.x) > left
+                    && Math.min(start.x, end.x) < right;
+        }
+        return start.x > left && start.x < right
+                && Math.max(start.y, end.y) > top
+                && Math.min(start.y, end.y) < bottom;
     }
 
     private static List<Point> normalizeRoute(List<Point> points) {
@@ -1258,6 +1559,16 @@ public class DiagramCanvas extends JComponent {
         return waypoints;
     }
 
+    private Point wireLabelPosition(Wire wire, int[][] points) {
+        if (labelDragWire != null && labelDragWire.id().equals(wire.id()) && labelDragPosition != null) {
+            return new Point(labelDragPosition);
+        }
+        if (wire.labelX() != null && wire.labelY() != null) {
+            return new Point(wire.labelX(), wire.labelY());
+        }
+        return wireLabelPosition(points);
+    }
+
     private static Point wireLabelPosition(int[][] points) {
         long totalLength = 0;
         for (int i = 0; i < points.length - 1; i++) {
@@ -1279,6 +1590,28 @@ public class DiagramCanvas extends JComponent {
             traversed += length;
         }
         return new Point(points[0][0], points[0][1]);
+    }
+
+    private Wire signalLabelAt(Point p) {
+        List<Wire> wires = model.getWires();
+        for (int i = wires.size() - 1; i >= 0; i--) {
+            Wire wire = wires.get(i);
+            int[][] points = route(wire);
+            if (points != null && signalLabelBounds(wire, points).contains(p)) {
+                return wire;
+            }
+        }
+        return null;
+    }
+
+    private Rectangle signalLabelBounds(Wire wire, int[][] points) {
+        Point label = wireLabelPosition(wire, points);
+        FontMetrics metrics = getFontMetrics(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        int baseline = label.y - 5;
+        Rectangle bounds = new Rectangle(label.x + 6, baseline - metrics.getAscent(),
+                metrics.stringWidth(wire.signalName()), metrics.getHeight());
+        bounds.grow(3, 3);
+        return bounds;
     }
 
     private Wire wireAt(Point p) {
@@ -1353,6 +1686,7 @@ public class DiagramCanvas extends JComponent {
     @Override
     protected void paintComponent(Graphics g0) {
         Graphics2D g = (Graphics2D) g0.create();
+        g.clip(getVisibleRect());
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
         g.setColor(BG);
@@ -1480,9 +1814,10 @@ public class DiagramCanvas extends JComponent {
 
         g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
         g.setColor(TEXT);
-        g.setClip(x + 4, y, width - 8, TITLE_H);
-        g.drawString(b.getInstanceLabel() + " : " + b.getEntityName(), x + 8, y + 18);
-        g.setClip(null);
+        Graphics2D titleGraphics = (Graphics2D) g.create();
+        titleGraphics.clipRect(x + 4, y, width - 8, TITLE_H);
+        titleGraphics.drawString(b.getInstanceLabel() + " : " + b.getEntityName(), x + 8, y + 18);
+        titleGraphics.dispose();
         if (selected) {
             int handleX = x + width - 14;
             int handleY = y + h - 14;
@@ -1501,17 +1836,18 @@ public class DiagramCanvas extends JComponent {
         }
         g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
         FontMetrics fm = g.getFontMetrics();
-        for (Pin pin : allPins()) {
-            if (!pin.blockId().equals(b.getId())) {
-                continue;
-            }
-            Point c = pin.point();
-            Port port = pin.port();
+        int inputIndex = 0;
+        int outputIndex = 0;
+        for (Port port : d.ports()) {
+            boolean input = port.dir() == Direction.IN;
+            int row = input ? inputIndex++ : outputIndex++;
+            int pinX = input ? x : x + width;
+            Point c = new Point(pinX, y + TITLE_H + row * ROW_H + ROW_H / 2);
             g.setColor(PIN_COLOR);
             g.fillRect(c.x - PIN / 2, c.y - PIN / 2, PIN, PIN);
             g.setColor(TEXT);
             int baseline = c.y + fm.getAscent() / 2 - 1;
-            if (port.dir() == Direction.IN) {
+            if (input) {
                 g.drawString(port.name() + port.widthLabel(), c.x + 8, baseline);
             } else {
                 String label = port.widthLabel() + (port.widthLabel().isEmpty() ? "" : " ") + port.name();
@@ -1543,7 +1879,7 @@ public class DiagramCanvas extends JComponent {
             }
         }
         g.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
-        Point label = wireLabelPosition(r);
+        Point label = wireLabelPosition(w, r);
         g.drawString(w.signalName(), label.x + 6, label.y - 5);
     }
 }

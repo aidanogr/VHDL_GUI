@@ -313,6 +313,11 @@ public class DiagramModel {
     }
 
     public void moveBlocks(Map<String, Point> positions) {
+        moveBlocks(positions, Map.of());
+    }
+
+    public void moveBlocks(Map<String, Point> positions,
+                           Map<String, List<Wire.Waypoint>> updatedWaypoints) {
         Map<String, Point> before = new LinkedHashMap<>();
         Map<String, Point> after = new LinkedHashMap<>();
         for (Map.Entry<String, Point> entry : positions.entrySet()) {
@@ -324,21 +329,37 @@ public class DiagramModel {
                 after.put(block.getId(), new Point(position));
             }
         }
-        if (after.isEmpty()) {
+        Map<String, Wire> wiresBefore = new LinkedHashMap<>();
+        Map<String, Wire> wiresAfter = new LinkedHashMap<>();
+        if (updatedWaypoints != null) {
+            for (Wire wire : wires) {
+                List<Wire.Waypoint> waypoints = updatedWaypoints.get(wire.id());
+                if (waypoints != null && !waypoints.equals(wire.waypoints())) {
+                    wiresBefore.put(wire.id(), wire);
+                    wiresAfter.put(wire.id(), new Wire(wire.id(), wire.fromBlock(), wire.fromPort(),
+                            wire.toBlock(), wire.toPort(), wire.signalName(), wire.bendX(), wire.bendY(),
+                            wire.approachX(), waypoints, wire.inlineExpression(), wire.labelX(), wire.labelY()));
+                }
+            }
+        }
+        if (after.isEmpty() && wiresAfter.isEmpty()) {
             return;
         }
         record(new Command() {
             @Override
             public void undo() {
                 applyBlockPositions(before);
+                applyWireStates(wiresBefore);
             }
 
             @Override
             public void redo() {
                 applyBlockPositions(after);
+                applyWireStates(wiresAfter);
             }
         });
         applyBlockPositions(after);
+        applyWireStates(wiresAfter);
         notifyListeners();
     }
 
@@ -452,7 +473,8 @@ public class DiagramModel {
             }
         }
         Wire created = new Wire(wire.id(), wire.fromBlock(), wire.fromPort(), wire.toBlock(), wire.toPort(),
-                signalName, wire.bendX(), wire.bendY(), wire.approachX(), wire.waypoints(), wire.inlineExpression());
+                signalName, wire.bendX(), wire.bendY(), wire.approachX(), wire.waypoints(),
+                wire.inlineExpression(), wire.labelX(), wire.labelY());
         wires.add(created);
         record(new Command() {
             @Override
@@ -558,6 +580,14 @@ public class DiagramModel {
         return updateWireRoute(existing, existing.withWaypoints(waypoints));
     }
 
+    public String updateWireLabelPosition(String wireId, int x, int y) {
+        Wire existing = findWire(wireId);
+        if (existing == null) {
+            return "wire not found";
+        }
+        return updateWireRoute(existing, existing.withLabelPosition(x, y));
+    }
+
     public String updateWireInlineExpression(String wireId, String expression) {
         Wire existing = findWire(wireId);
         if (existing == null) {
@@ -611,7 +641,8 @@ public class DiagramModel {
             if (sameNet(w, target)) {
                 oldNet.add(w);
                 newNet.add(new Wire(w.id(), w.fromBlock(), w.fromPort(), w.toBlock(), w.toPort(),
-                        newName, w.bendX(), w.bendY(), w.approachX(), w.waypoints(), w.inlineExpression()));
+                        newName, w.bendX(), w.bendY(), w.approachX(), w.waypoints(),
+                        w.inlineExpression(), w.labelX(), w.labelY()));
             }
         }
         swapWires(oldNet, newNet);
@@ -697,7 +728,8 @@ public class DiagramModel {
             } else if (old.dir() == updated.dir()) {
                 rewritten.add(new Wire(w.id(), w.fromBlock(), src ? updated.name() : w.fromPort(), w.toBlock(),
                         dst ? updated.name() : w.toPort(), src ? updated.name() : w.signalName(),
-                        w.bendX(), w.bendY(), w.approachX(), w.waypoints(), w.inlineExpression()));
+                        w.bendX(), w.bendY(), w.approachX(), w.waypoints(), w.inlineExpression(),
+                        w.labelX(), w.labelY()));
             }
         }
         wires.clear();
@@ -1022,6 +1054,18 @@ public class DiagramModel {
             Point position = entry.getValue();
             if (block != null) {
                 block.moveTo(position.x, position.y);
+            }
+        }
+    }
+
+    private void applyWireStates(Map<String, Wire> states) {
+        if (states.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < wires.size(); i++) {
+            Wire replacement = states.get(wires.get(i).id());
+            if (replacement != null) {
+                wires.set(i, replacement);
             }
         }
     }

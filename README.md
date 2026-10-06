@@ -33,17 +33,22 @@ java -cp target\classes vdml.ui.Main
   drivers and top-level outputs as sinks. A dashed preview is shown while a source
   is pending; Escape or clicking empty space cancels. Input-first attempts,
   duplicate connections, and already-driven input pins are rejected.
+- New wires use grid-aligned orthogonal routes and try nearby lanes that avoid
+  blocks. Breakpoints snap to the grid and choose the clearer side of the route;
+  moving endpoint blocks carries manual route bends with them. Dragging near the
+  canvas edge scrolls the view to make room.
 - Keep clicking input pins after the first connection to fan one output out to
   multiple sinks. The connections share one signal; press Escape or click empty
   space when finished.
 - Drag an interior horizontal or vertical wire segment to adjust the route.
+  Drag a signal label to reposition it; double-click it to rename the signal.
   Right-click a wire for **Resize…**, **Add breakpoint here**, and signal options.
   Resize derives the target vector width from the destination port and its generic
   values, then pads with zeroes or ones using a generated `numeric_std` expression.
   **Add breakpoint here** inserts an orthogonal detour; repeat on any segment to
   add more. Collinear or redundant breakpoints merge automatically as routes are
-  edited. Endpoints and signals stay unchanged; route positions and resize
-  expressions are saved and can be undone/redone.
+  edited. Endpoints and signals stay unchanged; route positions, label positions,
+  and resize expressions are saved and can be undone/redone.
 - Add or edit catalogue entities using **New entity…** and **Edit entity…**.
 - The right **Design tools** pane contains the block catalogue and VHDL actions.
   Click **Detach** to move it into a separate window (which can be moved to

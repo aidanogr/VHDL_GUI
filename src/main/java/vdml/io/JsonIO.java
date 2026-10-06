@@ -76,6 +76,10 @@ public final class JsonIO {
             item.put("bendX", wire.bendX());
             item.put("bendY", wire.bendY());
             item.put("approachX", wire.approachX());
+            if (wire.labelX() != null && wire.labelY() != null) {
+                item.put("labelX", wire.labelX());
+                item.put("labelY", wire.labelY());
+            }
             if (wire.inlineExpression() != null) {
                 item.put("inlineExpression", wire.inlineExpression());
             }
@@ -216,7 +220,8 @@ public final class JsonIO {
                     wires.add(new Wire(id, fromBlock, fromPort, toBlock, toPort, signalName,
                             asOptionalInt(map.get("bendX")), asOptionalInt(map.get("bendY")),
                             asOptionalInt(map.get("approachX")), waypoints,
-                            asNullableString(map.get("inlineExpression"))));
+                            asNullableString(map.get("inlineExpression")),
+                            asOptionalInt(map.get("labelX")), asOptionalInt(map.get("labelY"))));
                 }
             }
         }
