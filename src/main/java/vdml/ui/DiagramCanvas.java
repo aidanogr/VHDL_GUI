@@ -17,14 +17,22 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 
 import javax.swing.AbstractAction;
+import javax.swing.JComboBox;
 import javax.swing.JComponent;
+import javax.swing.JLabel;
 import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
+import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
+import javax.swing.JTextField;
 import javax.swing.JViewport;
 import javax.swing.SwingUtilities;
 import javax.swing.KeyStroke;
@@ -35,6 +43,7 @@ import vdml.model.Direction;
 import vdml.model.EntityDef;
 import vdml.model.Port;
 import vdml.model.Wire;
+import vdml.vhdl.VhdlTypeWidths;
 
 public class DiagramCanvas extends JComponent {
     static final int BLOCK_W = Block.DEFAULT_WIDTH;
@@ -80,17 +89,21 @@ public class DiagramCanvas extends JComponent {
     private double zoom = 1.0;
     private String selectedBlockId;
     private String selectedWireId;
+    private final Set<String> selectedBlockIds = new LinkedHashSet<>();
+    private final Set<String> selectedWireIds = new LinkedHashSet<>();
     private Pin pending;
     private boolean pendingHadConnection;
     private Pin hover;
     private Point mouse = new Point();
 
-    private Block dragBlock;
-    private int dragOffsetX;
-    private int dragOffsetY;
-    private int dragStartX;
-    private int dragStartY;
+    private Map<String, Point> dragBlockStartPositions;
+    private Point dragBlockStartMouse;
     private boolean dragMoved;
+    private Point marqueeStart;
+    private Point marqueeEnd;
+    private boolean marqueeActive;
+    private boolean marqueeMoved;
+    private boolean marqueeAdditive;
     private Block resizeBlock;
     private Point resizeStartMouse;
     private int resizeStartWidth;
@@ -194,21 +207,16 @@ public class DiagramCanvas extends JComponent {
             showError(error);
             return;
         }
-        selectedBlockId = model.getBlocks().get(model.getBlocks().size() - 1).getId();
-        selectedWireId = null;
-        repaint();
+        select(model.getBlocks().get(model.getBlocks().size() - 1).getId(), null);
     }
 
     public void deleteSelected() {
-        String error = null;
-        if (selectedWireId != null) {
-            error = model.removeWire(selectedWireId);
-        } else if (selectedBlockId != null) {
-            error = model.removeBlock(selectedBlockId);
-        }
+        String error = model.removeObjects(selectedBlockIds, selectedWireIds);
         if (error != null) {
             showError(error);
+            return;
         }
+        select(null, null);
     }
 
     public void cancelPending() {
@@ -216,6 +224,15 @@ public class DiagramCanvas extends JComponent {
             pending = null;
             status.accept(pendingHadConnection ? "Fan-out finished" : "Connection cancelled");
             pendingHadConnection = false;
+            repaint();
+        }
+        if (marqueeActive) {
+            marqueeActive = false;
+            marqueeStart = null;
+            marqueeEnd = null;
+            marqueeMoved = false;
+            marqueeAdditive = false;
+            setCursor(java.awt.Cursor.getDefaultCursor());
             repaint();
         }
     }
@@ -236,10 +253,8 @@ public class DiagramCanvas extends JComponent {
 
     private void installMouseWheel() {
         addMouseWheelListener(e -> {
-            if (e.isControlDown()) {
-                zoomAt(zoom * Math.pow(1.12, -e.getPreciseWheelRotation()), e.getPoint());
-                e.consume();
-            }
+            zoomAt(zoom * Math.pow(1.12, -e.getPreciseWheelRotation()), e.getPoint());
+            e.consume();
         });
     }
 
@@ -309,6 +324,9 @@ public class DiagramCanvas extends JComponent {
                 mouse = p;
                 if (panning) {
                     updatePan(e.getPoint());
+                } else if (marqueeActive) {
+                    marqueeEnd = p;
+                    marqueeMoved = !p.equals(marqueeStart);
                 } else if (resizeBlock != null) {
                     int width = Math.max(Block.MIN_WIDTH,
                             snap(resizeStartWidth + p.x - resizeStartMouse.x));
@@ -317,9 +335,17 @@ public class DiagramCanvas extends JComponent {
                     resizeBlock.setSize(width, height);
                     resizeMoved = width != resizeStartWidth || height != resizeStartHeight;
                     updatePreferredSize();
-                } else if (dragBlock != null) {
-                    dragBlock.moveTo(Math.max(0, snap(p.x - dragOffsetX)), Math.max(0, snap(p.y - dragOffsetY)));
-                    dragMoved = true;
+                } else if (dragBlockStartPositions != null) {
+                    int dx = p.x - dragBlockStartMouse.x;
+                    int dy = p.y - dragBlockStartMouse.y;
+                    for (Map.Entry<String, Point> entry : dragBlockStartPositions.entrySet()) {
+                        Block block = model.getBlock(entry.getKey());
+                        if (block != null) {
+                            Point start = entry.getValue();
+                            block.moveTo(Math.max(0, snap(start.x + dx)), Math.max(0, snap(start.y + dy)));
+                        }
+                    }
+                    dragMoved = dx != 0 || dy != 0;
                     updatePreferredSize();
                 } else if (routeDragWire != null) {
                     routeDragPoints = movedSegment(routeDragStartPoints, routeDragSegment,
@@ -344,7 +370,8 @@ public class DiagramCanvas extends JComponent {
                 int draggableSegment = wire == null ? -1 : draggableWireSegmentAt(wire, mouse);
                 boolean overWire = wire != null;
                 boolean overBlock = now == null && block != null;
-                int cursor = overResize ? java.awt.Cursor.SE_RESIZE_CURSOR
+                int cursor = marqueeActive ? java.awt.Cursor.CROSSHAIR_CURSOR
+                        : overResize ? java.awt.Cursor.SE_RESIZE_CURSOR
                         : overWire ? draggableSegment >= 0 ? wireSegmentCursor(wire, draggableSegment)
                                 : java.awt.Cursor.HAND_CURSOR
                         : overBlock ? java.awt.Cursor.MOVE_CURSOR
@@ -369,7 +396,9 @@ public class DiagramCanvas extends JComponent {
     }
 
     private void finishDrag() {
-        if (resizeBlock != null) {
+        if (marqueeActive) {
+            finishMarquee();
+        } else if (resizeBlock != null) {
             Block block = resizeBlock;
             int width = block.getWidth();
             int height = block.getHeight();
@@ -383,20 +412,76 @@ public class DiagramCanvas extends JComponent {
             }
             resizeStartMouse = null;
             resizeMoved = false;
-        } else if (dragBlock == null) {
+        } else if (dragBlockStartPositions == null) {
             finishWireDrag();
         } else {
-            Block block = dragBlock;
-            dragBlock = null;
-            int nx = block.getX();
-            int ny = block.getY();
-            block.moveTo(dragStartX, dragStartY);
+            Map<String, Point> destinations = new LinkedHashMap<>();
+            for (Map.Entry<String, Point> entry : dragBlockStartPositions.entrySet()) {
+                Block block = model.getBlock(entry.getKey());
+                if (block != null) {
+                    destinations.put(entry.getKey(), new Point(block.getX(), block.getY()));
+                    block.moveTo(entry.getValue().x, entry.getValue().y);
+                }
+            }
+            dragBlockStartPositions = null;
+            dragBlockStartMouse = null;
             if (dragMoved) {
-                model.moveBlock(block.getId(), nx, ny);
+                model.moveBlocks(destinations);
             }
             dragMoved = false;
         }
         repaint();
+    }
+
+    private void finishMarquee() {
+        boolean moved = marqueeMoved;
+        boolean additive = marqueeAdditive;
+        Rectangle bounds = marqueeBounds();
+        marqueeActive = false;
+        marqueeStart = null;
+        marqueeEnd = null;
+        marqueeMoved = false;
+        marqueeAdditive = false;
+        setCursor(java.awt.Cursor.getDefaultCursor());
+        if (!additive) {
+            selectedBlockIds.clear();
+            selectedWireIds.clear();
+        }
+        if (moved && bounds != null && (bounds.width > 2 || bounds.height > 2)) {
+            for (Block block : model.getBlocks()) {
+                Rectangle blockBounds = new Rectangle(block.getX(), block.getY(),
+                        block.getWidth(), blockHeight(block));
+                if (bounds.intersects(blockBounds)) {
+                    selectedBlockIds.add(block.getId());
+                }
+            }
+            for (Wire wire : model.getWires()) {
+                int[][] points = route(wire);
+                if (points == null) {
+                    continue;
+                }
+                for (int i = 0; i < points.length - 1; i++) {
+                    if (bounds.intersectsLine(points[i][0], points[i][1],
+                            points[i + 1][0], points[i + 1][1])) {
+                        selectedWireIds.add(wire.id());
+                        break;
+                    }
+                }
+            }
+        }
+        updateSelectionPrimaries();
+        status.accept("Selected " + selectedBlockIds.size() + " block(s) and "
+                + selectedWireIds.size() + " wire(s).");
+    }
+
+    private Rectangle marqueeBounds() {
+        if (marqueeStart == null || marqueeEnd == null) {
+            return null;
+        }
+        return new Rectangle(Math.min(marqueeStart.x, marqueeEnd.x),
+                Math.min(marqueeStart.y, marqueeEnd.y),
+                Math.abs(marqueeEnd.x - marqueeStart.x),
+                Math.abs(marqueeEnd.y - marqueeStart.y));
     }
 
     private void startPan(Point p) {
@@ -494,13 +579,13 @@ public class DiagramCanvas extends JComponent {
             return;
         }
 
-        Block selected = selectedBlock();
-        if (selected != null && isResizeHandle(selected, p)) {
-            resizeBlock = selected;
+        Block blockUnderPointer = blockAt(p);
+        if (blockUnderPointer != null && isResizeHandle(blockUnderPointer, p)) {
+            resizeBlock = blockUnderPointer;
             resizeStartMouse = p;
-            resizeStartWidth = selected.getWidth();
-            resizeStartHeight = blockHeight(selected);
-            resizeStartStoredHeight = selected.getHeight();
+            resizeStartWidth = blockUnderPointer.getWidth();
+            resizeStartHeight = blockHeight(blockUnderPointer);
+            resizeStartStoredHeight = blockUnderPointer.getHeight();
             resizeMoved = false;
             status.accept("Drag the corner handle to resize this block.");
             return;
@@ -508,7 +593,15 @@ public class DiagramCanvas extends JComponent {
 
         Wire wire = wireAt(p);
         if (wire != null) {
-            select(null, wire.id());
+            if (e.isShiftDown() || e.isControlDown()) {
+                toggleWireSelection(wire.id());
+                return;
+            }
+            if (!selectedWireIds.contains(wire.id())) {
+                select(null, wire.id());
+            } else if (selectedWireId == null) {
+                selectedWireId = wire.id();
+            }
             List<Point> points = routePoints(wire);
             int segment = draggableWireSegmentAt(wire, p);
             if (canDragSegment(points, segment)) {
@@ -528,20 +621,56 @@ public class DiagramCanvas extends JComponent {
             return;
         }
 
-        Block block = blockAt(p);
+        Block block = blockUnderPointer;
         if (block != null) {
-            select(block.getId(), null);
+            if (e.isShiftDown() || e.isControlDown()) {
+                toggleBlockSelection(block.getId());
+                return;
+            }
+            if (!selectedBlockIds.contains(block.getId())) {
+                select(block.getId(), null);
+            } else if (selectedBlockId == null) {
+                selectedBlockId = block.getId();
+            }
             if (e.getClickCount() >= 2) {
                 blockActivated.accept(block);
                 return;
             }
-            dragBlock = block;
-            dragOffsetX = p.x - block.getX();
-            dragOffsetY = p.y - block.getY();
-            dragStartX = block.getX();
-            dragStartY = block.getY();
+            dragBlockStartPositions = new LinkedHashMap<>();
+            for (String blockId : selectedBlockIds) {
+                Block selectedItem = model.getBlock(blockId);
+                if (selectedItem != null) {
+                    dragBlockStartPositions.put(blockId,
+                            new Point(selectedItem.getX(), selectedItem.getY()));
+                }
+            }
+            dragBlockStartMouse = p;
             dragMoved = false;
+            return;
         }
+
+        marqueeStart = p;
+        marqueeEnd = p;
+        marqueeActive = true;
+        marqueeMoved = false;
+        marqueeAdditive = e.isShiftDown() || e.isControlDown();
+        setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.CROSSHAIR_CURSOR));
+    }
+
+    private void toggleBlockSelection(String blockId) {
+        if (!selectedBlockIds.remove(blockId)) {
+            selectedBlockIds.add(blockId);
+        }
+        updateSelectionPrimaries();
+        repaint();
+    }
+
+    private void toggleWireSelection(String wireId) {
+        if (!selectedWireIds.remove(wireId)) {
+            selectedWireIds.add(wireId);
+        }
+        updateSelectionPrimaries();
+        repaint();
     }
 
     private void popup(MouseEvent e) {
@@ -558,6 +687,10 @@ public class DiagramCanvas extends JComponent {
             menu.add(item("Delete block", this::deleteSelected));
         } else if (wire != null) {
             select(null, wire.id());
+            menu.add(item("Resize…", () -> resizeWire(wire)));
+            if (wire.inlineExpression() != null) {
+                menu.add(item("Clear inline expression", () -> updateInlineExpression(wire, null)));
+            }
             int segment = wireSegmentAt(wire, p);
             if (segment >= 0) {
                 menu.add(item("Add breakpoint here", () -> addBreakpoint(wire, segment, p)));
@@ -575,6 +708,82 @@ public class DiagramCanvas extends JComponent {
         JMenuItem item = new JMenuItem(text);
         item.addActionListener(e -> action.run());
         return item;
+    }
+
+    private void resizeWire(Wire wire) {
+        Port source = model.endpointPort(wire.fromBlock(), wire.fromPort());
+        Port destination = model.endpointPort(wire.toBlock(), wire.toPort());
+        if (source == null || destination == null) {
+            showError("Cannot resize this wire because an endpoint is missing.");
+            return;
+        }
+        if (!VhdlTypeWidths.isVectorType(source.type()) || !VhdlTypeWidths.isVectorType(destination.type())) {
+            showError("Resize is available for std_logic_vector, signed, or unsigned ports. "
+                    + "Scalar std_logic wires do not need resizing.");
+            return;
+        }
+
+        String sourceWidth = VhdlTypeWidths.widthExpression(model, wire.fromBlock(), wire.fromPort());
+        String destinationWidth = VhdlTypeWidths.widthExpression(model, wire.toBlock(), wire.toPort());
+        String resizeResultType = VhdlTypeWidths.vectorTypeName(destination.type());
+        JTextField targetWidth = new JTextField(destinationWidth == null ? "" : destinationWidth, 18);
+        JComboBox<String> fill = new JComboBox<>(new String[] {"0 (zero fill)", "1 (one fill)"});
+        String[] fillValues = {"0", "1"};
+        String signalToken = Wire.SIGNAL_TOKEN;
+        String fillOnePrefix = resizeResultType + "(not (resize(unsigned(not (" + signalToken + ")), ";
+        String fillZeroPrefix = resizeResultType + "(resize(unsigned(" + signalToken + "), ";
+        String existingExpression = wire.inlineExpression();
+        if (existingExpression != null && existingExpression.startsWith(fillOnePrefix)
+                && existingExpression.endsWith(")))")) {
+            targetWidth.setText(existingExpression.substring(fillOnePrefix.length(),
+                    existingExpression.length() - 3));
+            fill.setSelectedIndex(1);
+        } else if (existingExpression != null && existingExpression.startsWith(fillZeroPrefix)
+                && existingExpression.endsWith("))")) {
+            targetWidth.setText(existingExpression.substring(fillZeroPrefix.length(),
+                    existingExpression.length() - 2));
+        }
+        JPanel fields = new JPanel(new java.awt.GridLayout(0, 2, 8, 6));
+        fields.add(new JLabel("Connection"));
+        fields.add(new JLabel(model.describeEndpoint(wire.fromBlock(), wire.fromPort()) + " → "
+                + model.describeEndpoint(wire.toBlock(), wire.toPort())));
+        fields.add(new JLabel("Source width"));
+        fields.add(new JLabel(sourceWidth == null ? "Could not infer" : sourceWidth));
+        fields.add(new JLabel("Target width"));
+        fields.add(targetWidth);
+        fields.add(new JLabel("Pad with"));
+        fields.add(fill);
+        fields.add(new JLabel("Note"));
+        fields.add(new JLabel("Wider sources are truncated to the target width."));
+
+        int answer = JOptionPane.showConfirmDialog(this, fields, "Resize connection",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (answer != JOptionPane.OK_OPTION) {
+            return;
+        }
+        String width = targetWidth.getText().trim();
+        if (width.isEmpty()) {
+            showError("Enter a target width or use the inferred destination width.");
+            return;
+        }
+        String pad = fillValues[fill.getSelectedIndex()];
+        String expression = pad.equals("0")
+                ? resizeResultType + "(resize(unsigned(" + signalToken + "), " + width + "))"
+                : resizeResultType + "(not (resize(unsigned(not (" + signalToken + ")), " + width + ")))";
+        updateInlineExpression(wire, expression);
+    }
+
+    private void updateInlineExpression(Wire wire, String expression) {
+        String error = model.updateWireInlineExpression(wire.id(), expression);
+        if (error != null) {
+            showError(error);
+        } else {
+            status.accept(expression == null
+                    ? "Inline expression cleared; wire uses its original signal."
+                    : "Wire resized with inline expression: "
+                            + model.getWires().stream().filter(candidate -> candidate.id().equals(wire.id()))
+                                    .findFirst().map(Wire::connectionExpression).orElse(expression));
+        }
     }
 
     private void addBreakpoint(Wire wire, int segment, Point location) {
@@ -654,16 +863,30 @@ public class DiagramCanvas extends JComponent {
     private void select(String blockId, String wireId) {
         selectedBlockId = blockId;
         selectedWireId = wireId;
+        selectedBlockIds.clear();
+        selectedWireIds.clear();
+        if (blockId != null) {
+            selectedBlockIds.add(blockId);
+        }
+        if (wireId != null) {
+            selectedWireIds.add(wireId);
+        }
         repaint();
     }
 
+    private void updateSelectionPrimaries() {
+        if (selectedBlockId == null || !selectedBlockIds.contains(selectedBlockId)) {
+            selectedBlockId = selectedBlockIds.stream().reduce((first, second) -> second).orElse(null);
+        }
+        if (selectedWireId == null || !selectedWireIds.contains(selectedWireId)) {
+            selectedWireId = selectedWireIds.stream().reduce((first, second) -> second).orElse(null);
+        }
+    }
+
     private void onModelChanged() {
-        if (selectedBlockId != null && model.getBlock(selectedBlockId) == null) {
-            selectedBlockId = null;
-        }
-        if (selectedWireId != null && model.getWires().stream().noneMatch(w -> w.id().equals(selectedWireId))) {
-            selectedWireId = null;
-        }
+        selectedBlockIds.removeIf(id -> model.getBlock(id) == null);
+        selectedWireIds.removeIf(id -> model.getWires().stream().noneMatch(wire -> wire.id().equals(id)));
+        updateSelectionPrimaries();
         if (pending != null && model.endpointPort(pending.blockId(), pending.port().name()) == null) {
             pending = null;
             pendingHadConnection = false;
@@ -900,7 +1123,7 @@ public class DiagramCanvas extends JComponent {
     }
 
     private boolean isResizeHandle(Block block, Point p) {
-        if (block == null || !block.getId().equals(selectedBlockId)) {
+        if (block == null || !selectedBlockIds.contains(block.getId())) {
             return false;
         }
         int x = block.getX() + block.getWidth() - 14;
@@ -1175,6 +1398,17 @@ public class DiagramCanvas extends JComponent {
                     new float[] {6f, 4f}, 0f));
             g.drawLine(a.x, a.y, end.x, end.y);
         }
+        if (showSelection && marqueeActive) {
+            Rectangle bounds = marqueeBounds();
+            if (bounds != null) {
+                g.setColor(new Color(0x6d, 0x4a, 0xff, 48));
+                g.fillRect(bounds.x, bounds.y, bounds.width, bounds.height);
+                g.setColor(SELECT);
+                g.setStroke(new BasicStroke(1.5f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER,
+                        10f, new float[] {5f, 4f}, 0f));
+                g.drawRect(bounds.x, bounds.y, bounds.width, bounds.height);
+            }
+        }
     }
 
     private void paintTopBoundary(Graphics2D g, int bottom) {
@@ -1235,7 +1469,7 @@ public class DiagramCanvas extends JComponent {
         int y = b.getY();
         int width = b.getWidth();
         int h = blockHeight(b);
-        boolean selected = showSelection && b.getId().equals(selectedBlockId);
+        boolean selected = showSelection && selectedBlockIds.contains(b.getId());
         g.setColor(BLOCK_FILL);
         g.fillRect(x, y, width, h);
         g.setColor(TITLE_FILL);
@@ -1291,7 +1525,7 @@ public class DiagramCanvas extends JComponent {
         if (r == null) {
             return;
         }
-        boolean selected = showSelection && w.id().equals(selectedWireId);
+        boolean selected = showSelection && selectedWireIds.contains(w.id());
         g.setStroke(new BasicStroke(selected ? 3f : 1.5f));
         g.setColor(selected ? WIRE_SELECTED : WIRE);
         for (int i = 0; i < r.length - 1; i++) {

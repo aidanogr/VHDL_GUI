@@ -1,11 +1,14 @@
 package vdml.model;
 
+import java.awt.Point;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import vdml.model.commands.Command;
 
@@ -111,10 +114,7 @@ public class DiagramModel {
     }
 
     public void setEntityCatalog(Map<String, EntityDef> catalog) {
-        entityCatalog.clear();
-        if (catalog != null) {
-            entityCatalog.putAll(catalog);
-        }
+        replaceEntityCatalog(catalog);
     }
 
     public List<Block> getBlocks() {
@@ -312,6 +312,36 @@ public class DiagramModel {
         notifyListeners();
     }
 
+    public void moveBlocks(Map<String, Point> positions) {
+        Map<String, Point> before = new LinkedHashMap<>();
+        Map<String, Point> after = new LinkedHashMap<>();
+        for (Map.Entry<String, Point> entry : positions.entrySet()) {
+            Block block = blocksById.get(entry.getKey());
+            Point position = entry.getValue();
+            if (block != null && position != null
+                    && (block.getX() != position.x || block.getY() != position.y)) {
+                before.put(block.getId(), new Point(block.getX(), block.getY()));
+                after.put(block.getId(), new Point(position));
+            }
+        }
+        if (after.isEmpty()) {
+            return;
+        }
+        record(new Command() {
+            @Override
+            public void undo() {
+                applyBlockPositions(before);
+            }
+
+            @Override
+            public void redo() {
+                applyBlockPositions(after);
+            }
+        });
+        applyBlockPositions(after);
+        notifyListeners();
+    }
+
     public String resizeBlock(String blockId, int width, int height) {
         Block block = blocksById.get(blockId);
         if (block == null) {
@@ -421,7 +451,8 @@ public class DiagramModel {
                 signalName = ensureUniqueSignalName(signalName);
             }
         }
-        Wire created = new Wire(wire.id(), wire.fromBlock(), wire.fromPort(), wire.toBlock(), wire.toPort(), signalName);
+        Wire created = new Wire(wire.id(), wire.fromBlock(), wire.fromPort(), wire.toBlock(), wire.toPort(),
+                signalName, wire.bendX(), wire.bendY(), wire.approachX(), wire.waypoints(), wire.inlineExpression());
         wires.add(created);
         record(new Command() {
             @Override
@@ -460,6 +491,47 @@ public class DiagramModel {
         return null;
     }
 
+    public String removeObjects(Set<String> blockIds, Set<String> wireIds) {
+        Set<String> blocksToRemove = blockIds == null ? Set.of() : new LinkedHashSet<>(blockIds);
+        Set<String> wiresToRemove = wireIds == null ? Set.of() : new LinkedHashSet<>(wireIds);
+        for (String blockId : blocksToRemove) {
+            if (!blocksById.containsKey(blockId)) {
+                return "block not found: " + blockId;
+            }
+        }
+        for (String wireId : wiresToRemove) {
+            if (findWire(wireId) == null) {
+                return "wire not found: " + wireId;
+            }
+        }
+        if (blocksToRemove.isEmpty() && wiresToRemove.isEmpty()) {
+            return null;
+        }
+        List<Block> blocksBefore = new ArrayList<>(blocks);
+        List<Wire> wiresBefore = new ArrayList<>(wires);
+        List<Block> blocksAfter = blocksBefore.stream()
+                .filter(block -> !blocksToRemove.contains(block.getId())).toList();
+        List<Wire> wiresAfter = wiresBefore.stream()
+                .filter(wire -> !wiresToRemove.contains(wire.id())
+                        && !blocksToRemove.contains(wire.fromBlock())
+                        && !blocksToRemove.contains(wire.toBlock()))
+                .toList();
+        record(new Command() {
+            @Override
+            public void undo() {
+                applyBlocksAndWires(blocksBefore, wiresBefore);
+            }
+
+            @Override
+            public void redo() {
+                applyBlocksAndWires(blocksAfter, wiresAfter);
+            }
+        });
+        applyBlocksAndWires(blocksAfter, wiresAfter);
+        notifyListeners();
+        return null;
+    }
+
     /** Moves a wire's visual elbow only; its endpoints and signal remain unchanged. */
     public String moveWireElbow(String wireId, int x, int y) {
         Wire existing = findWire(wireId);
@@ -484,6 +556,18 @@ public class DiagramModel {
             return "wire not found";
         }
         return updateWireRoute(existing, existing.withWaypoints(waypoints));
+    }
+
+    public String updateWireInlineExpression(String wireId, String expression) {
+        Wire existing = findWire(wireId);
+        if (existing == null) {
+            return "wire not found";
+        }
+        String normalized = expression == null || expression.isBlank() ? null : expression.trim();
+        if (normalized != null && (normalized.contains("\n") || normalized.contains("\r"))) {
+            return "inline expressions must fit on one line";
+        }
+        return updateWireRoute(existing, existing.withInlineExpression(normalized));
     }
 
     private String updateWireRoute(Wire existing, Wire moved) {
@@ -527,7 +611,7 @@ public class DiagramModel {
             if (sameNet(w, target)) {
                 oldNet.add(w);
                 newNet.add(new Wire(w.id(), w.fromBlock(), w.fromPort(), w.toBlock(), w.toPort(),
-                        newName, w.bendX(), w.bendY(), w.approachX(), w.waypoints()));
+                        newName, w.bendX(), w.bendY(), w.approachX(), w.waypoints(), w.inlineExpression()));
             }
         }
         swapWires(oldNet, newNet);
@@ -613,7 +697,7 @@ public class DiagramModel {
             } else if (old.dir() == updated.dir()) {
                 rewritten.add(new Wire(w.id(), w.fromBlock(), src ? updated.name() : w.fromPort(), w.toBlock(),
                         dst ? updated.name() : w.toPort(), src ? updated.name() : w.signalName(),
-                        w.bendX(), w.bendY(), w.approachX(), w.waypoints()));
+                        w.bendX(), w.bendY(), w.approachX(), w.waypoints(), w.inlineExpression()));
             }
         }
         wires.clear();
@@ -723,6 +807,9 @@ public class DiagramModel {
 
     /** Creates a catalogue entity (oldName == null) or replaces/renames an existing one. */
     public String defineEntity(String oldName, EntityDef def) {
+        if (StandardLibrary.contains(oldName)) {
+            return "standard library entities cannot be edited";
+        }
         if (!isIdentifier(def.name())) {
             return "invalid VHDL identifier: " + def.name();
         }
@@ -785,6 +872,9 @@ public class DiagramModel {
     }
 
     public String removeEntity(String name) {
+        if (StandardLibrary.contains(name)) {
+            return "standard library entities cannot be removed";
+        }
         if (!entityCatalog.containsKey(name)) {
             return "entity not found: " + name;
         }
@@ -843,9 +933,7 @@ public class DiagramModel {
             wires.addAll(newWires);
         }
         if (catalog != null) {
-            Map<String, EntityDef> copy = new LinkedHashMap<>(catalog);
-            entityCatalog.clear();
-            entityCatalog.putAll(copy);
+            replaceEntityCatalog(catalog);
         }
         clearUndoHistory();
         notifyListeners();
@@ -926,6 +1014,27 @@ public class DiagramModel {
         blocksById.remove(blockId);
         blocks.removeIf(b -> b.getId().equals(blockId));
         wires.removeIf(w -> w.fromBlock().equals(blockId) || w.toBlock().equals(blockId));
+    }
+
+    private void applyBlockPositions(Map<String, Point> positions) {
+        for (Map.Entry<String, Point> entry : positions.entrySet()) {
+            Block block = blocksById.get(entry.getKey());
+            Point position = entry.getValue();
+            if (block != null) {
+                block.moveTo(position.x, position.y);
+            }
+        }
+    }
+
+    private void applyBlocksAndWires(List<Block> updatedBlocks, List<Wire> updatedWires) {
+        blocks.clear();
+        blocks.addAll(updatedBlocks);
+        blocksById.clear();
+        for (Block block : blocks) {
+            blocksById.put(block.getId(), block);
+        }
+        wires.clear();
+        wires.addAll(updatedWires);
     }
 
     private void applyBlockProps(Block block, String label, Map<String, String> generics) {
@@ -1152,5 +1261,17 @@ public class DiagramModel {
                 new Port("b", Direction.IN, "std_logic_vector(7 downto 0)"),
                 new Port("y", Direction.OUT, "std_logic_vector(7 downto 0)")
         ), List.of()));
+        entityCatalog.putAll(StandardLibrary.definitions());
+    }
+
+    private void replaceEntityCatalog(Map<String, EntityDef> catalog) {
+        entityCatalog.clear();
+        if (catalog != null) {
+            entityCatalog.putAll(catalog);
+        }
+        for (EntityDef standardEntity : StandardLibrary.definitions().values()) {
+            entityCatalog.keySet().removeIf(name -> name.equalsIgnoreCase(standardEntity.name()));
+            entityCatalog.put(standardEntity.name(), standardEntity);
+        }
     }
 }

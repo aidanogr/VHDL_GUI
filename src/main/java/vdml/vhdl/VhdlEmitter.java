@@ -12,6 +12,7 @@ import vdml.model.DiagramModel;
 import vdml.model.Direction;
 import vdml.model.EntityDef;
 import vdml.model.Port;
+import vdml.model.StandardLibrary;
 import vdml.model.Wire;
 
 public final class VhdlEmitter {
@@ -74,8 +75,8 @@ public final class VhdlEmitter {
         Map<String, String> signals = new LinkedHashMap<>();
         for (Wire wire : model.getWires()) {
             if (!DiagramModel.TOP_ID.equals(wire.fromBlock())) {
-                Port driver = model.endpointPort(wire.fromBlock(), wire.fromPort());
-                signals.putIfAbsent(wire.signalName(), driver == null ? "std_logic" : driver.type());
+                String signalType = VhdlTypeWidths.resolvedType(model, wire.fromBlock(), wire.fromPort());
+                signals.putIfAbsent(wire.signalName(), signalType == null ? "std_logic" : signalType);
             }
         }
         int width = 0;
@@ -114,7 +115,7 @@ public final class VhdlEmitter {
             Map<String, String> connected = new LinkedHashMap<>();
             for (Wire wire : model.getWires()) {
                 if (wire.toBlock().equals(block.getId())) {
-                    connected.put(wire.toPort(), wire.signalName());
+                    connected.put(wire.toPort(), wire.connectionExpression());
                 }
                 if (wire.fromBlock().equals(block.getId())) {
                     connected.put(wire.fromPort(), wire.signalName());
@@ -158,7 +159,7 @@ public final class VhdlEmitter {
             String driver = null;
             for (Wire wire : model.getWires()) {
                 if (DiagramModel.TOP_ID.equals(wire.toBlock()) && wire.toPort().equals(port.name())) {
-                    driver = wire.signalName();
+                    driver = wire.connectionExpression();
                 }
             }
             sb.append(driver == null ? "  -- " + port.name() + " is not driven\n"
@@ -170,7 +171,51 @@ public final class VhdlEmitter {
     }
 
     public static String emitAll(DiagramModel model) {
-        return emitComponentsPackage(model) + "\n" + emitStructuralArchitecture(model);
+        StringBuilder sb = new StringBuilder(emitComponentsPackage(model)).append('\n');
+        for (String source : emitStandardLibraryFiles(model).values()) {
+            sb.append(source).append('\n');
+        }
+        return sb.append(emitStructuralArchitecture(model)).toString();
+    }
+
+    public static Map<String, String> emitStandardLibraryFiles(DiagramModel model) {
+        Map<String, String> files = new LinkedHashMap<>();
+        for (Block block : model.getBlocks()) {
+            EntityDef def = null;
+            for (EntityDef standardEntity : StandardLibrary.definitions().values()) {
+                if (standardEntity.name().equalsIgnoreCase(block.getEntityName())) {
+                    def = standardEntity;
+                    break;
+                }
+            }
+            if (def == null || files.containsKey(def.name() + ".vhd")) {
+                continue;
+            }
+            String statement = StandardLibrary.architectureStatement(def.name());
+            if (statement == null) {
+                continue;
+            }
+            StringBuilder source = new StringBuilder();
+            source.append("library ieee;\nuse ieee.std_logic_1164.all;\n\n");
+            source.append("entity ").append(def.name()).append(" is\n");
+            if (!def.generics().isEmpty()) {
+                source.append("  generic (\n");
+                appendJoined(source, def.generics(), "    ", ";");
+                source.append("  );\n");
+            }
+            if (!def.ports().isEmpty()) {
+                source.append("  port (\n");
+                appendJoined(source, portDecls(def.ports()), "    ", ";");
+                source.append("  );\n");
+            }
+            source.append("end entity ").append(def.name()).append(";\n\n");
+            source.append("architecture rtl of ").append(def.name()).append(" is\n")
+                    .append("begin\n")
+                    .append("  ").append(statement).append('\n')
+                    .append("end architecture rtl;\n");
+            files.put(def.name() + ".vhd", source.toString());
+        }
+        return files;
     }
 
     private static List<String> portDecls(List<Port> ports) {
@@ -187,8 +232,19 @@ public final class VhdlEmitter {
 
     private static String contextClauses(DiagramModel model) {
         StringBuilder sb = new StringBuilder();
+        boolean needsNumericStd = model.getWires().stream()
+                .anyMatch(wire -> wire.inlineExpression() != null && !wire.inlineExpression().isBlank());
+        boolean hasIeee = model.getLibraries().stream().anyMatch(library -> library.equalsIgnoreCase("ieee"));
+        if (needsNumericStd && !hasIeee) {
+            sb.append("library ieee;\n");
+        }
         for (String library : model.getLibraries()) {
             sb.append("library ").append(library).append(";\n");
+        }
+        boolean hasNumericStd = model.getLibraryUses().stream()
+                .anyMatch(use -> use.equalsIgnoreCase("ieee.numeric_std.all"));
+        if (needsNumericStd && !hasNumericStd) {
+            sb.append("use ieee.numeric_std.all;\n");
         }
         for (String selectedName : model.getLibraryUses()) {
             sb.append("use ").append(selectedName).append(";\n");

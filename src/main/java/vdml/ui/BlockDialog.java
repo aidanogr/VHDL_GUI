@@ -1,6 +1,7 @@
 package vdml.ui;
 
 import java.awt.BorderLayout;
+import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.GridBagLayout;
@@ -10,7 +11,9 @@ import java.util.List;
 import java.util.Map;
 
 import javax.swing.BorderFactory;
+import javax.swing.AbstractCellEditor;
 import javax.swing.JButton;
+import javax.swing.JComboBox;
 import javax.swing.JDialog;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
@@ -18,6 +21,7 @@ import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.TableCellEditor;
 
 import vdml.model.Block;
 import vdml.model.DiagramModel;
@@ -33,13 +37,14 @@ public class BlockDialog extends JDialog {
     private final EntityDef def;
     private final JTextField label = new JTextField(18);
     private final DefaultTableModel genericRows = new DefaultTableModel(
-            new String[] {"Generic", "Type", "Default", "Value"}, 0) {
+            new String[] {"Generic", "Type", "Default", "Value / top-level generic"}, 0) {
         @Override
         public boolean isCellEditable(int row, int column) {
             return column == 3;
         }
     };
     private final JTable genericTable = new JTable(genericRows);
+    private final TopLevelGenericCellEditor topLevelGenericEditor = new TopLevelGenericCellEditor();
 
     public static void show(Window owner, DiagramModel model, Block block) {
         new BlockDialog(owner, model, block).setVisible(true);
@@ -51,6 +56,8 @@ public class BlockDialog extends JDialog {
         this.block = block;
         this.def = model.getEntityCatalog().get(block.getEntityName());
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
+        genericTable.getColumnModel().getColumn(3).setCellEditor(topLevelGenericEditor);
+        genericTable.setToolTipText("Choose a compatible top-level generic or enter a VHDL expression.");
 
         label.setText(block.getInstanceLabel());
         JPanel top = new JPanel(new GridBagLayout());
@@ -75,7 +82,8 @@ public class BlockDialog extends JDialog {
                 genericRows.addRow(new Object[] {name, EntityDef.genericType(formal),
                         EntityDef.genericDefault(formal), block.getGenerics().getOrDefault(name, "")});
             }
-            center.add(wrap("Generics (leave Value empty to use the default)", genericTable, 80));
+            center.add(wrap("Generics (empty uses default; choose a top-level generic to pass it down)",
+                    genericTable, 80));
         }
         if (def != null) {
             center.add(wrap("Inputs", portTable(def.inputs()), 130));
@@ -135,6 +143,53 @@ public class BlockDialog extends JDialog {
         scroll.setPreferredSize(new Dimension(520, height));
         panel.add(scroll, BorderLayout.CENTER);
         return panel;
+    }
+
+    private class TopLevelGenericCellEditor extends AbstractCellEditor implements TableCellEditor {
+        private final JComboBox<String> choices = new JComboBox<>();
+
+        TopLevelGenericCellEditor() {
+            choices.setEditable(true);
+        }
+
+        @Override
+        public Component getTableCellEditorComponent(JTable table, Object value,
+                                                      boolean isSelected, int row, int column) {
+            String current = value == null ? "" : value.toString();
+            String genericType = String.valueOf(genericRows.getValueAt(row, 1)).trim();
+            choices.removeAllItems();
+            choices.addItem("");
+            for (String declaration : model.getTopGenerics()) {
+                if (!genericType.isEmpty()
+                        && sameType(genericType, EntityDef.genericType(declaration))) {
+                    choices.addItem(EntityDef.genericName(declaration));
+                }
+            }
+            if (!containsChoice(current)) {
+                choices.addItem(current);
+            }
+            choices.setSelectedItem(current);
+            return choices;
+        }
+
+        @Override
+        public Object getCellEditorValue() {
+            Object selected = choices.getEditor().getItem();
+            return selected == null ? "" : selected.toString();
+        }
+
+        private boolean containsChoice(String value) {
+            for (int i = 0; i < choices.getItemCount(); i++) {
+                if (choices.getItemAt(i).equals(value)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean sameType(String left, String right) {
+            return left.replaceAll("\\s+", "").equalsIgnoreCase(right.replaceAll("\\s+", ""));
+        }
     }
 
     private void apply() {

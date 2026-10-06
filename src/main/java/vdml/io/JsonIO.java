@@ -76,6 +76,9 @@ public final class JsonIO {
             item.put("bendX", wire.bendX());
             item.put("bendY", wire.bendY());
             item.put("approachX", wire.approachX());
+            if (wire.inlineExpression() != null) {
+                item.put("inlineExpression", wire.inlineExpression());
+            }
             if (wire.waypoints() != null) {
                 List<Map<String, Object>> waypoints = new ArrayList<>();
                 for (Wire.Waypoint point : wire.waypoints()) {
@@ -212,7 +215,8 @@ public final class JsonIO {
                     }
                     wires.add(new Wire(id, fromBlock, fromPort, toBlock, toPort, signalName,
                             asOptionalInt(map.get("bendX")), asOptionalInt(map.get("bendY")),
-                            asOptionalInt(map.get("approachX")), waypoints));
+                            asOptionalInt(map.get("approachX")), waypoints,
+                            asNullableString(map.get("inlineExpression"))));
                 }
             }
         }
@@ -356,6 +360,10 @@ public final class JsonIO {
 
     private static String asString(Object value, String fallback) {
         return value == null ? fallback : String.valueOf(value);
+    }
+
+    private static String asNullableString(Object value) {
+        return value == null ? null : String.valueOf(value);
     }
 
     private static int asInt(Object value, int fallback) {

@@ -10,9 +10,13 @@ vdml\ui\TopLevelPanel$PortTable$1.class
 vdml\model\Block.class
 vdml\model\commands\Command.class
 vdml\ui\TopLevelOptionsPanel$ContextList$1.class
+vdml\model\StandardLibrary.class
 vdml\ui\TopLevelOptionsPanel$GenericTable$1.class
+vdml\vhdl\VhdlTypeWidths.class
 vdml\ui\TopLevelOptionsPanel$ContextList.class
 vdml\ui\TopLevelPanel$PortTable.class
+vdml\ui\BlockDialog$TopLevelGenericCellEditor.class
+vdml\model\DiagramModel$11.class
 vdml\model\DiagramModel$6.class
 vdml\ui\Main$2.class
 vdml\model\DiagramModel$3.class
@@ -29,6 +33,7 @@ vdml\io\JsonIO$JsonParser.class
 vdml\ui\BlockDialog$1.class
 vdml\model\DiagramModel$7.class
 vdml\validation\DesignValidator$Severity.class
+vdml\model\DiagramModel$12.class
 vdml\model\DiagramModel$ChangeListener.class
 vdml\ui\TopLevelOptionsPanel$LibrarySection.class
 vdml\ui\DiagramCanvas$2.class

@@ -24,8 +24,10 @@ import vdml.model.DiagramModel;
 import vdml.model.Direction;
 import vdml.model.EntityDef;
 import vdml.model.Port;
+import vdml.model.StandardLibrary;
 import vdml.model.Wire;
 import vdml.vhdl.VhdlEmitter;
+import vdml.vhdl.VhdlTypeWidths;
 
 public final class DesignValidator {
     public enum Severity {
@@ -160,6 +162,12 @@ public final class DesignValidator {
             if (!DiagramModel.isIdentifier(wire.signalName())) {
                 error(findings, "Netlist", "Wire " + wire.id() + " has invalid signal name: " + wire.signalName());
             }
+            if (wire.inlineExpression() != null
+                    && (wire.inlineExpression().isBlank()
+                            || wire.inlineExpression().contains("\n")
+                            || wire.inlineExpression().contains("\r"))) {
+                error(findings, "Netlist", "Wire " + wire.id() + " has an empty or multiline inline expression.");
+            }
             String sinkKey = wire.toBlock() + "." + wire.toPort();
             Wire previous = sinkDrivers.putIfAbsent(sinkKey, wire);
             if (previous != null) {
@@ -174,7 +182,8 @@ public final class DesignValidator {
             }
             Port source = model.endpointPort(wire.fromBlock(), wire.fromPort());
             Port sink = model.endpointPort(wire.toBlock(), wire.toPort());
-            if (source != null && sink != null && !sameType(source.type(), sink.type())) {
+            if (wire.inlineExpression() == null && source != null && sink != null
+                    && !samePortType(model, wire, source, sink)) {
                 warning(findings, "Net type compatibility", "Wire " + wire.id() + " joins "
                         + source.type() + " to " + sink.type() + "; confirm the VHDL subtypes are compatible.");
             }
@@ -212,6 +221,22 @@ public final class DesignValidator {
     private static boolean sameType(String left, String right) {
         return left != null && right != null
                 && left.replaceAll("\\s+", "").equalsIgnoreCase(right.replaceAll("\\s+", ""));
+    }
+
+    private static boolean samePortType(DiagramModel model, Wire wire, Port source, Port sink) {
+        String sourceVector = VhdlTypeWidths.vectorTypeName(source.type());
+        String sinkVector = VhdlTypeWidths.vectorTypeName(sink.type());
+        if (sourceVector != null || sinkVector != null) {
+            if (sourceVector == null || sinkVector == null || !sourceVector.equalsIgnoreCase(sinkVector)) {
+                return false;
+            }
+            String sourceWidth = VhdlTypeWidths.widthExpression(model, wire.fromBlock(), wire.fromPort());
+            String sinkWidth = VhdlTypeWidths.widthExpression(model, wire.toBlock(), wire.toPort());
+            return sourceWidth == null || sinkWidth == null
+                    ? sameType(source.type(), sink.type())
+                    : sourceWidth.replaceAll("\\s+", "").equalsIgnoreCase(sinkWidth.replaceAll("\\s+", ""));
+        }
+        return sameType(source.type(), sink.type());
     }
 
     private static void inspectJsonRoundTrip(DiagramModel model, List<Finding> findings) {
@@ -256,6 +281,18 @@ public final class DesignValidator {
         if (!architecture.toLowerCase(Locale.ROOT).contains("use work.components_pkg.all;")) {
             error(findings, "Generated architecture", "The architecture does not import components_pkg.");
             allChecksPassed = false;
+        }
+        for (Map.Entry<String, String> standardFile : VhdlEmitter.emitStandardLibraryFiles(model).entrySet()) {
+            String entityName = standardFile.getKey().replaceFirst("(?i)\\.vhd$", "");
+            String expectedStatement = StandardLibrary.architectureStatement(entityName);
+            if (!matches(standardFile.getValue(), "(?im)^entity\\s+" + Pattern.quote(entityName) + "\\s+is\\b")
+                    || expectedStatement == null
+                    || !standardFile.getValue().toLowerCase(Locale.ROOT)
+                            .contains(expectedStatement.toLowerCase(Locale.ROOT))) {
+                error(findings, "Generated standard library",
+                        "Generated source for " + entityName + " is missing its entity or implementation.");
+                allChecksPassed = false;
+            }
         }
         String entitySection = entitySection(architecture, model.getTopEntity());
         if (entitySection == null) {
@@ -315,8 +352,7 @@ public final class DesignValidator {
             }
             Map<String, String> connected = connectedPorts(model, block);
             for (Map.Entry<String, String> association : connected.entrySet()) {
-                if (!matches(section, "(?i)\\b" + Pattern.quote(association.getKey())
-                        + "\\s*=>\\s*" + Pattern.quote(association.getValue()) + "\\b")) {
+                if (!containsAssociation(section, association.getKey(), association.getValue())) {
                     error(findings, "Port-map consistency", block.getInstanceLabel() + "."
                             + association.getKey() + " should map to " + association.getValue() + ".");
                     allChecksPassed = false;
@@ -346,9 +382,10 @@ public final class DesignValidator {
             }
             if (DiagramModel.TOP_ID.equals(wire.toBlock())
                     && !matches(architecture, "(?im)^\\s*" + Pattern.quote(wire.toPort())
-                            + "\\s*<=\\s*" + Pattern.quote(wire.signalName()) + "\\s*;")) {
+                            + "\\s*<=\\s*" + Pattern.quote(wire.connectionExpression()) + "\\s*;")) {
                 error(findings, "Top-level assignments",
-                        "Generated architecture does not assign " + wire.signalName() + " to " + wire.toPort() + ".");
+                        "Generated architecture does not assign " + wire.connectionExpression()
+                                + " to " + wire.toPort() + ".");
                 allChecksPassed = false;
             }
         }
@@ -362,7 +399,7 @@ public final class DesignValidator {
         Map<String, String> connected = new HashMap<>();
         for (Wire wire : model.getWires()) {
             if (wire.toBlock().equals(block.getId())) {
-                connected.put(wire.toPort(), wire.signalName());
+                connected.put(wire.toPort(), wire.connectionExpression());
             }
             if (wire.fromBlock().equals(block.getId())) {
                 connected.put(wire.fromPort(), wire.signalName());
@@ -412,6 +449,10 @@ public final class DesignValidator {
                 .contains(expected.replaceAll("\\s+", "").toLowerCase(Locale.ROOT));
     }
 
+    private static boolean containsAssociation(String section, String port, String expression) {
+        return containsDeclaration(section, port + "=>" + expression);
+    }
+
     private static boolean matches(String text, String expression) {
         return Pattern.compile(expression, Pattern.CASE_INSENSITIVE | Pattern.MULTILINE)
                 .matcher(text).find();
@@ -425,8 +466,15 @@ public final class DesignValidator {
             Path architectureFile = temporaryDirectory.resolve("design.vhd");
             Files.writeString(packageFile, VhdlEmitter.emitComponentsPackage(model), StandardCharsets.UTF_8);
             Files.writeString(architectureFile, VhdlEmitter.emitStructuralArchitecture(model), StandardCharsets.UTF_8);
+            List<String> files = new ArrayList<>();
+            files.add("components_pkg.vhd");
+            for (Map.Entry<String, String> standardFile : VhdlEmitter.emitStandardLibraryFiles(model).entrySet()) {
+                Files.writeString(temporaryDirectory.resolve(standardFile.getKey()),
+                        standardFile.getValue(), StandardCharsets.UTF_8);
+                files.add(standardFile.getKey());
+            }
+            files.add("design.vhd");
             Path log = temporaryDirectory.resolve("ghdl.log");
-            String[] files = {"components_pkg.vhd", "design.vhd"};
             for (String file : files) {
                 ProcessBuilder builder = new ProcessBuilder("ghdl", "-a", "--std=08",
                         "--workdir=" + temporaryDirectory.toAbsolutePath(), file)
@@ -454,7 +502,8 @@ public final class DesignValidator {
                     return;
                 }
             }
-            pass(findings, "GHDL analysis", "GHDL analyzed the generated package and structural design.");
+            pass(findings, "GHDL analysis",
+                    "GHDL analyzed the generated package, standard library components, and structural design.");
         } catch (IOException ex) {
             error(findings, "GHDL analysis", "Could not prepare compiler inputs: " + ex.getMessage());
         } catch (InterruptedException ex) {

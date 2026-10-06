@@ -65,9 +65,10 @@ public class Main {
     private static final String HINT =
             "Fan-out: click one output, then multiple inputs; Esc finishes. Move: drag block. "
                     + "Resize: drag selected corner. "
-                    + "Reroute: drag wire segments; right-click a wire to add a breakpoint. "
+                    + "Drag empty canvas to select multiple blocks and wires; Shift-drag adds to selection. "
+                    + "Reroute: drag wire segments; right-click a wire to resize, add a breakpoint, or edit its signal. "
                     + "Pan any direction: middle-drag or Space+drag. "
-                    + "Zoom: Ctrl+wheel or canvas controls.";
+                    + "Zoom: mouse wheel or canvas controls.";
     private File currentFile;
 
     public static void main(String[] args) {
@@ -121,11 +122,12 @@ public class Main {
         validationStatus.setBorder(BorderFactory.createEmptyBorder(3, 8, 3, 8));
         canvas.setStatusListener(statusBar::setText);
         canvas.setToolTipText("Drag blocks to move; select a block and drag its bottom-right handle to resize. "
-                + "Wires approach port pins horizontally. Drag the source, middle, or block-entry handle to adjust "
-                + "the route or the segment length into the destination without disconnecting either end. "
+                + "Drag empty canvas to select multiple blocks and wires; Shift/Ctrl adds to selection. "
+                + "Right-click a wire for Resize, breakpoint, or signal options. Drag interior wire segments to reroute "
+                + "without disconnecting either end. "
                 + "To fan out one output, click it once and then click multiple input pins; press Esc to finish. "
                 + "Pan in any direction with the middle mouse button or Space+left-drag. "
-                + "Hold Ctrl and use the wheel to zoom.");
+                + "Use the mouse wheel to zoom around the pointer.");
         canvas.setBlockActivatedListener(block -> BlockDialog.show(frame, model, block));
         model.addChangeListener(this::modelChanged);
         refreshLiveValidation();
@@ -376,9 +378,15 @@ public class Main {
         String pkg = VhdlEmitter.emitComponentsPackage(model);
         String arch = VhdlEmitter.emitStructuralArchitecture(model);
         System.out.println("-- components_pkg.vhd\n" + pkg);
+        StringBuilder generated = new StringBuilder(pkg).append('\n');
+        for (var file : VhdlEmitter.emitStandardLibraryFiles(model).entrySet()) {
+            System.out.println("-- " + file.getKey() + "\n" + file.getValue());
+            generated.append(file.getValue()).append('\n');
+        }
         System.out.println("-- " + model.getTopEntity() + ".vhd\n" + arch);
+        generated.append(arch);
 
-        JTextArea area = new JTextArea(pkg + "\n" + arch, 30, 90);
+        JTextArea area = new JTextArea(generated.toString(), 30, 90);
         area.setEditable(false);
         area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         JScrollPane pane = new JScrollPane(area);
@@ -398,9 +406,16 @@ public class Main {
         try {
             Files.writeString(dir.resolve("components_pkg.vhd"), VhdlEmitter.emitComponentsPackage(model),
                     StandardCharsets.UTF_8);
+            var standardFiles = VhdlEmitter.emitStandardLibraryFiles(model);
+            for (var file : standardFiles.entrySet()) {
+                Files.writeString(dir.resolve(file.getKey()), file.getValue(), StandardCharsets.UTF_8);
+            }
             Files.writeString(dir.resolve(model.getTopEntity() + ".vhd"), VhdlEmitter.emitStructuralArchitecture(model),
                     StandardCharsets.UTF_8);
-            JOptionPane.showMessageDialog(frame, "Wrote components_pkg.vhd and " + model.getTopEntity() + ".vhd to\n" + dir);
+            String standardSummary = standardFiles.isEmpty() ? "" : " plus "
+                    + standardFiles.size() + " standard library source file(s)";
+            JOptionPane.showMessageDialog(frame, "Wrote components_pkg.vhd and " + model.getTopEntity()
+                    + ".vhd" + standardSummary + " to\n" + dir);
         } catch (IOException ex) {
             error("Could not write VHDL: " + ex.getMessage());
         }

@@ -6,6 +6,7 @@ D:\vhdl-gui\src\main\java\vdml\model\DiagramModel.java
 D:\vhdl-gui\src\main\java\vdml\model\Direction.java
 D:\vhdl-gui\src\main\java\vdml\model\EntityDef.java
 D:\vhdl-gui\src\main\java\vdml\model\Port.java
+D:\vhdl-gui\src\main\java\vdml\model\StandardLibrary.java
 D:\vhdl-gui\src\main\java\vdml\model\Wire.java
 D:\vhdl-gui\src\main\java\vdml\ui\BlockDialog.java
 D:\vhdl-gui\src\main\java\vdml\ui\DiagramCanvas.java
@@ -16,3 +17,4 @@ D:\vhdl-gui\src\main\java\vdml\ui\TopLevelPanel.java
 D:\vhdl-gui\src\main\java\vdml\ui\UiUtil.java
 D:\vhdl-gui\src\main\java\vdml\validation\DesignValidator.java
 D:\vhdl-gui\src\main\java\vdml\vhdl\VhdlEmitter.java
+D:\vhdl-gui\src\main\java\vdml\vhdl\VhdlTypeWidths.java
