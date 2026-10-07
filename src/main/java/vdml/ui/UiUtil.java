@@ -1,6 +1,7 @@
 package vdml.ui;
 
 import java.awt.Component;
+import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -36,6 +37,14 @@ final class UiUtil {
         if (table.isEditing()) {
             table.getCellEditor().stopCellEditing();
         }
+    }
+
+    static void styleTable(JTable table) {
+        table.setFillsViewportHeight(true);
+        table.setRowHeight(26);
+        table.setShowVerticalLines(false);
+        table.setIntercellSpacing(new Dimension(8, 2));
+        table.getTableHeader().setReorderingAllowed(false);
     }
 
     static void warn(Component parent, String message) {

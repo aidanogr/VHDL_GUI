@@ -6,6 +6,7 @@ import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.GridBagLayout;
 import java.awt.Window;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,10 +25,12 @@ import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableCellEditor;
 
 import vdml.model.Block;
+import vdml.model.ArchitectureDef;
 import vdml.model.DiagramModel;
 import vdml.model.Direction;
 import vdml.model.EntityDef;
 import vdml.model.Port;
+import vdml.model.StandardLibrary;
 import vdml.model.Wire;
 
 /** Properties of one placed block: label, generics, and what each port is wired to. */
@@ -35,6 +38,7 @@ public class BlockDialog extends JDialog {
     private final DiagramModel model;
     private final Block block;
     private final EntityDef def;
+    private final Path projectVhdlDirectory;
     private final JTextField label = new JTextField(18);
     private final DefaultTableModel genericRows = new DefaultTableModel(
             new String[] {"Generic", "Type", "Default", "Value / top-level generic"}, 0) {
@@ -44,20 +48,36 @@ public class BlockDialog extends JDialog {
         }
     };
     private final JTable genericTable = new JTable(genericRows);
+    private final JComboBox<String> architectureSelector = new JComboBox<>();
     private final TopLevelGenericCellEditor topLevelGenericEditor = new TopLevelGenericCellEditor();
 
     public static void show(Window owner, DiagramModel model, Block block) {
-        new BlockDialog(owner, model, block).setVisible(true);
+        show(owner, model, block, null);
     }
 
-    private BlockDialog(Window owner, DiagramModel model, Block block) {
+    public static void show(Window owner, DiagramModel model, Block block, Path projectVhdlDirectory) {
+        new BlockDialog(owner, model, block, projectVhdlDirectory).setVisible(true);
+    }
+
+    private BlockDialog(Window owner, DiagramModel model, Block block, Path projectVhdlDirectory) {
         super(owner, "Block " + block.getInstanceLabel(), ModalityType.APPLICATION_MODAL);
         this.model = model;
         this.block = block;
+        this.projectVhdlDirectory = projectVhdlDirectory;
         this.def = model.getEntityCatalog().get(block.getEntityName());
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
+        UiUtil.styleTable(genericTable);
         genericTable.getColumnModel().getColumn(3).setCellEditor(topLevelGenericEditor);
         genericTable.setToolTipText("Choose a compatible top-level generic or enter a VHDL expression.");
+        if (def != null) {
+            for (var architecture : def.architectures()) {
+                architectureSelector.addItem(architecture.name());
+            }
+        }
+        if (block.getArchitectureName() != null) {
+            architectureSelector.setSelectedItem(block.getArchitectureName());
+        }
+        architectureSelector.setEnabled(architectureSelector.getItemCount() > 0);
 
         label.setText(block.getInstanceLabel());
         JPanel top = new JPanel(new GridBagLayout());
@@ -65,10 +85,19 @@ public class BlockDialog extends JDialog {
         top.add(new JLabel(block.getEntityName()), UiUtil.cell(1, 0, false));
         top.add(new JLabel("Instance label"), UiUtil.cell(0, 1, false));
         top.add(label, UiUtil.cell(1, 1, true));
+        top.add(new JLabel("Architecture"), UiUtil.cell(0, 2, false));
+        top.add(architectureSelector, UiUtil.cell(1, 2, true));
+        JButton editArchitecture = new JButton("Edit arch…");
+        editArchitecture.setEnabled(def != null && !StandardLibrary.contains(def.name())
+                && def.sourceOverride() == null && architectureSelector.getItemCount() > 0);
+        editArchitecture.setToolTipText(def != null && def.sourceOverride() != null
+                ? "Edit the imported source file and re-import the entity." : null);
+        editArchitecture.addActionListener(e -> editSelectedArchitecture());
+        top.add(editArchitecture, UiUtil.cell(2, 2, false));
         JButton editEntity = new JButton("Edit entity…");
-        editEntity.setEnabled(def != null);
+        editEntity.setEnabled(def != null && def.sourceOverride() == null);
         editEntity.addActionListener(e -> {
-            EntityEditorDialog.show(this, model, def);
+            EntityEditorDialog.show(this, model, def, projectVhdlDirectory);
             dispose();
         });
         top.add(editEntity, UiUtil.cell(2, 1, false));
@@ -117,6 +146,7 @@ public class BlockDialog extends JDialog {
             tableModel.addRow(new Object[] {port.name(), port.type(), connections(port)});
         }
         JTable table = new JTable(tableModel);
+        UiUtil.styleTable(table);
         table.getColumnModel().getColumn(0).setPreferredWidth(70);
         table.getColumnModel().getColumn(1).setPreferredWidth(190);
         table.getColumnModel().getColumn(2).setPreferredWidth(200);
@@ -134,6 +164,38 @@ public class BlockDialog extends JDialog {
             }
         }
         return parts.isEmpty() ? "-" : String.join(", ", parts);
+    }
+
+    private void editSelectedArchitecture() {
+        EntityDef currentDefinition = model.getEntityCatalog().get(block.getEntityName());
+        if (currentDefinition == null || StandardLibrary.contains(currentDefinition.name())) {
+            UiUtil.warn(this, "This entity does not have an editable architecture.");
+            return;
+        }
+        String selectedName = (String) architectureSelector.getSelectedItem();
+        ArchitectureDef selected = null;
+        for (ArchitectureDef architecture : currentDefinition.architectures()) {
+            if (architecture.name().equalsIgnoreCase(selectedName)) {
+                selected = architecture;
+                break;
+            }
+        }
+        if (selected == null) {
+            UiUtil.warn(this, "Select an architecture first.");
+            return;
+        }
+        ArchitectureDef updated = ArchitectureEditorDialog.show(
+                this, model, currentDefinition, selected, projectVhdlDirectory);
+        if (updated == null) {
+            return;
+        }
+        List<ArchitectureDef> architectures = new java.util.ArrayList<>(currentDefinition.architectures());
+        architectures.set(architectures.indexOf(selected), updated);
+        String error = model.defineEntity(currentDefinition.name(), new EntityDef(
+                currentDefinition.name(), currentDefinition.ports(), currentDefinition.generics(), architectures));
+        if (error != null) {
+            UiUtil.warn(this, error);
+        }
     }
 
     private JPanel wrap(String title, JTable table, int height) {
@@ -201,7 +263,8 @@ public class BlockDialog extends JDialog {
                 values.put((String) genericRows.getValueAt(i, 0), value);
             }
         }
-        String error = model.updateBlock(block.getId(), label.getText().trim(), values);
+        String error = model.updateBlock(block.getId(), label.getText().trim(), values,
+                (String) architectureSelector.getSelectedItem());
         if (error != null) {
             UiUtil.warn(this, error);
             return;

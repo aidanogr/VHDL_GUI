@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 import vdml.model.Block;
+import vdml.model.ArchitectureDef;
 import vdml.model.DiagramModel;
 import vdml.model.Direction;
 import vdml.model.EntityDef;
@@ -28,6 +29,8 @@ public final class JsonIO {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("version", 1);
         root.put("topEntity", model.getTopEntity());
+        root.put("userSignals", model.getUserSignals());
+        root.put("userLogic", model.getUserLogic());
 
         List<Map<String, Object>> topPorts = new ArrayList<>();
         for (Port port : model.getTopPorts()) {
@@ -57,6 +60,9 @@ public final class JsonIO {
             item.put("y", block.getY());
             item.put("width", block.getWidth());
             item.put("height", block.getHeight());
+            if (block.getArchitectureName() != null) {
+                item.put("architecture", block.getArchitectureName());
+            }
             blocks.add(item);
         }
         root.put("blocks", blocks);
@@ -111,6 +117,18 @@ public final class JsonIO {
                 portList.add(portEntry);
             }
             entity.put("ports", portList);
+            List<Map<String, Object>> architectures = new ArrayList<>();
+            for (ArchitectureDef architecture : entry.getValue().architectures()) {
+                Map<String, Object> architectureEntry = new LinkedHashMap<>();
+                architectureEntry.put("name", architecture.name());
+                architectureEntry.put("declarations", architecture.declarations());
+                architectureEntry.put("logic", architecture.logic());
+                architectures.add(architectureEntry);
+            }
+            entity.put("architectures", architectures);
+            if (entry.getValue().sourceOverride() != null) {
+                entity.put("sourceOverride", entry.getValue().sourceOverride());
+            }
             entityCatalog.put(entry.getKey(), entity);
         }
         root.put("entityCatalog", entityCatalog);
@@ -132,6 +150,8 @@ public final class JsonIO {
 
         DiagramModel model = new DiagramModel();
         model.setTopEntity(asString(root.get("topEntity"), DiagramModel.DEFAULT_TOP_ENTITY));
+        model.updateTopLevelUserCode(
+                asString(root.get("userSignals"), ""), asString(root.get("userLogic"), ""));
         if (root.get("libraries") instanceof List<?> libraryEntries) {
             model.setLibraries(toStringList(libraryEntries));
         }
@@ -165,7 +185,25 @@ public final class JsonIO {
                             }
                         }
                     }
-                    catalog.put(name, new EntityDef(name, ports, generics));
+                    List<ArchitectureDef> architectures = null;
+                    Object architectureValues = entityMap.get("architectures");
+                    if (architectureValues instanceof List<?> architectureList) {
+                        architectures = new ArrayList<>();
+                        for (Object architectureValue : architectureList) {
+                            if (architectureValue instanceof Map<?, ?> architectureMap) {
+                                architectures.add(new ArchitectureDef(
+                                        asString(architectureMap.get("name"), ""),
+                                        asString(architectureMap.get("declarations"), ""),
+                                        asString(architectureMap.get("logic"), "")));
+                            }
+                        }
+                    }
+                    String sourceOverride = entityMap.get("sourceOverride") instanceof String source
+                            ? source : null;
+                    catalog.put(name, architectures == null
+                            ? new EntityDef(name, ports, generics, List.of(new ArchitectureDef("rtl", "", "")),
+                                    sourceOverride)
+                            : new EntityDef(name, ports, generics, architectures, sourceOverride));
                 }
             }
         }
@@ -191,6 +229,7 @@ public final class JsonIO {
                     int width = asInt(map.get("width"), Block.DEFAULT_WIDTH);
                     int height = asInt(map.get("height"), 0);
                     Block block = new Block(id, entityName, instanceLabel, generics, x, y, width, height);
+                    block.setArchitectureName(asNullableString(map.get("architecture")));
                     blocks.add(block);
                 }
             }

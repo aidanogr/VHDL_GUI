@@ -30,6 +30,8 @@ public class DiagramModel {
     private final List<Command> redoStack = new ArrayList<>();
     private final List<ChangeListener> listeners = new ArrayList<>();
     private String topEntity = DEFAULT_TOP_ENTITY;
+    private String userSignals = "";
+    private String userLogic = "";
 
     public DiagramModel() {
         initDemoCatalogue();
@@ -53,6 +55,40 @@ public class DiagramModel {
 
     public String getTopEntity() {
         return topEntity;
+    }
+
+    public String getUserSignals() {
+        return userSignals;
+    }
+
+    public String getUserLogic() {
+        return userLogic;
+    }
+
+    public void updateTopLevelUserCode(String signals, String logic) {
+        String updatedSignals = signals == null ? "" : signals;
+        String updatedLogic = logic == null ? "" : logic;
+        if (userSignals.equals(updatedSignals) && userLogic.equals(updatedLogic)) {
+            return;
+        }
+        String previousSignals = userSignals;
+        String previousLogic = userLogic;
+        record(new Command() {
+            @Override
+            public void undo() {
+                userSignals = previousSignals;
+                userLogic = previousLogic;
+            }
+
+            @Override
+            public void redo() {
+                userSignals = updatedSignals;
+                userLogic = updatedLogic;
+            }
+        });
+        userSignals = updatedSignals;
+        userLogic = updatedLogic;
+        notifyListeners();
     }
 
     public void setTopEntity(String topEntity) {
@@ -394,6 +430,13 @@ public class DiagramModel {
 
     public String updateBlock(String blockId, String label, Map<String, String> newGenerics) {
         Block block = blocksById.get(blockId);
+        return updateBlock(blockId, label, newGenerics,
+                block == null ? null : block.getArchitectureName());
+    }
+
+    public String updateBlock(String blockId, String label, Map<String, String> newGenerics,
+                              String architectureName) {
+        Block block = blocksById.get(blockId);
         if (block == null) {
             return "block not found";
         }
@@ -403,19 +446,29 @@ public class DiagramModel {
         if (nameInUse(label, block, null, null)) {
             return "name already in use: " + label;
         }
+        EntityDef entity = entityCatalog.get(block.getEntityName());
+        if (architectureName != null && entity != null
+                && entity.architectures().stream().noneMatch(architecture ->
+                        architecture.name().equalsIgnoreCase(architectureName))) {
+            return "architecture not found: " + architectureName;
+        }
         String oldLabel = block.getInstanceLabel();
         Map<String, String> oldGenerics = new LinkedHashMap<>(block.getGenerics());
+        String oldArchitecture = block.getArchitectureName();
         Map<String, String> updated = new LinkedHashMap<>(newGenerics);
         applyBlockProps(block, label, updated);
+        block.setArchitectureName(architectureName);
         record(new Command() {
             @Override
             public void undo() {
                 applyBlockProps(block, oldLabel, oldGenerics);
+                block.setArchitectureName(oldArchitecture);
             }
 
             @Override
             public void redo() {
                 applyBlockProps(block, label, updated);
+                block.setArchitectureName(architectureName);
             }
         });
         notifyListeners();
@@ -679,6 +732,46 @@ public class DiagramModel {
         return null;
     }
 
+    public String importTopInterface(EntityDef entity) {
+        if (entity == null || !isIdentifier(entity.name())) {
+            return "invalid VHDL entity name";
+        }
+        if (entityCatalog.keySet().stream().anyMatch(entity.name()::equalsIgnoreCase)) {
+            return "top-level name already used by a catalogue entity: " + entity.name();
+        }
+        List<String> names = new ArrayList<>();
+        for (Port port : entity.ports()) {
+            String error = validatePort(port);
+            if (error != null) {
+                return error;
+            }
+            if (names.stream().anyMatch(name -> name.equalsIgnoreCase(port.name()))) {
+                return "duplicate top-level port: " + port.name();
+            }
+            names.add(port.name());
+        }
+        for (String generic : entity.generics()) {
+            String name = EntityDef.genericName(generic);
+            if (!isIdentifier(name)) {
+                return "invalid top-level generic declaration: " + generic;
+            }
+            if (names.stream().anyMatch(existing -> existing.equalsIgnoreCase(name))) {
+                return "top-level generic conflicts with another interface name: " + name;
+            }
+            names.add(name);
+        }
+
+        Snapshot before = capture();
+        topEntity = entity.name();
+        topPorts.clear();
+        topPorts.addAll(entity.ports());
+        topGenerics.clear();
+        topGenerics.addAll(entity.generics());
+        wires.removeIf(wire -> !isCompatibleTopWire(wire));
+        commit(before);
+        return null;
+    }
+
     public String addTopPort(Port port) {
         String error = validatePort(port);
         if (error != null) {
@@ -868,9 +961,24 @@ public class DiagramModel {
             seen.add(p.name().toLowerCase());
         }
         for (String generic : def.generics()) {
-            if (!isIdentifier(EntityDef.genericName(generic))) {
+            String genericName = EntityDef.genericName(generic);
+            if (!isIdentifier(genericName)) {
                 return "invalid generic declaration: " + generic;
             }
+            if (seen.contains(genericName.toLowerCase())) {
+                return "generic name conflicts with an existing interface name: " + genericName;
+            }
+            seen.add(genericName.toLowerCase());
+        }
+        List<String> seenArchitectures = new ArrayList<>();
+        for (ArchitectureDef architecture : def.architectures()) {
+            if (!isIdentifier(architecture.name())) {
+                return "invalid architecture identifier: " + architecture.name();
+            }
+            if (seenArchitectures.stream().anyMatch(name -> name.equalsIgnoreCase(architecture.name()))) {
+                return "duplicate architecture name: " + architecture.name();
+            }
+            seenArchitectures.add(architecture.name());
         }
 
         Snapshot before = capture();
@@ -894,6 +1002,13 @@ public class DiagramModel {
         }
         entityCatalog.clear();
         entityCatalog.putAll(rebuilt);
+        for (Block block : blocks) {
+            if (block.getEntityName().equals(def.name()) && block.getArchitectureName() != null
+                    && def.architectures().stream().noneMatch(architecture ->
+                            architecture.name().equalsIgnoreCase(block.getArchitectureName()))) {
+                block.setArchitectureName(null);
+            }
+        }
         wires.removeIf(w -> {
             Port from = endpointPort(w.fromBlock(), w.fromPort());
             Port to = endpointPort(w.toBlock(), w.toPort());
@@ -973,6 +1088,8 @@ public class DiagramModel {
 
     public void loadFrom(DiagramModel other) {
         topEntity = other.topEntity;
+        userSignals = other.userSignals;
+        userLogic = other.userLogic;
         setTopPorts(new ArrayList<>(other.topPorts));
         setTopGenerics(new ArrayList<>(other.topGenerics));
         setLibraries(new ArrayList<>(other.libraries));
@@ -985,7 +1102,8 @@ public class DiagramModel {
     /** State touched by top-level and catalogue edits; blocks are kept by identity. */
     private record Snapshot(String top, List<Port> topPorts, List<String> topGenerics,
                             List<String> libraries, List<String> libraryUses, List<Wire> wires,
-                            Map<String, EntityDef> catalog, Map<Block, String> entityNames) {
+                            Map<String, EntityDef> catalog, Map<Block, String> entityNames,
+                            String userSignals, String userLogic) {
     }
 
     private Snapshot capture() {
@@ -995,7 +1113,7 @@ public class DiagramModel {
         }
         return new Snapshot(topEntity, new ArrayList<>(topPorts), new ArrayList<>(topGenerics),
                 new ArrayList<>(libraries), new ArrayList<>(libraryUses), new ArrayList<>(wires),
-                new LinkedHashMap<>(entityCatalog), names);
+                new LinkedHashMap<>(entityCatalog), names, userSignals, userLogic);
     }
 
     private void restore(Snapshot s) {
@@ -1013,6 +1131,8 @@ public class DiagramModel {
         entityCatalog.clear();
         entityCatalog.putAll(s.catalog());
         s.entityNames().forEach(Block::setEntityName);
+        userSignals = s.userSignals();
+        userLogic = s.userLogic();
     }
 
     private void commit(Snapshot before) {
@@ -1113,6 +1233,22 @@ public class DiagramModel {
             return "port " + port.name() + " needs a type";
         }
         return null;
+    }
+
+    private boolean isCompatibleTopWire(Wire wire) {
+        if (TOP_ID.equals(wire.fromBlock())) {
+            Port port = findTopPort(wire.fromPort());
+            if (port == null || port.dir() != Direction.IN) {
+                return false;
+            }
+        }
+        if (TOP_ID.equals(wire.toBlock())) {
+            Port port = findTopPort(wire.toPort());
+            if (port == null || port.dir() != Direction.OUT) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private String updateContextItem(List<String> items, int index, String value, boolean useClause) {

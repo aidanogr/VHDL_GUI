@@ -1719,6 +1719,7 @@ public class DiagramCanvas extends JComponent {
         }
         List<Pin> pins = allPins();
         paintTopPins(g, pins);
+        paintFanoutDots(g);
         if (showSelection) {
             paintPinHighlights(g, pins);
         }
@@ -1776,6 +1777,32 @@ public class DiagramCanvas extends JComponent {
                 g.drawString(label, c.x + 8, baseline);
             }
         }
+    }
+
+    private void paintFanoutDots(Graphics2D g) {
+        Set<String> paintedSources = new LinkedHashSet<>();
+        for (Wire wire : model.getWires()) {
+            String source = wire.fromBlock() + "\u0000" + wire.fromPort();
+            if (!paintedSources.add(source) || fanOutCount(wire) < 2) {
+                continue;
+            }
+            Point point = pinPoint(wire.fromBlock(), wire.fromPort());
+            if (point != null) {
+                g.setColor(WIRE);
+                g.fillOval(point.x - 4, point.y - 4, 8, 8);
+            }
+        }
+    }
+
+    private int fanOutCount(Wire wire) {
+        int count = 0;
+        for (Wire candidate : model.getWires()) {
+            if (candidate.fromBlock().equals(wire.fromBlock())
+                    && candidate.fromPort().equals(wire.fromPort())) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private void paintPinHighlights(Graphics2D g, List<Pin> pins) {

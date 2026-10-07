@@ -1,5 +1,9 @@
 D:\vhdl-gui\src\main\java\vdml\io\DiagramPdfExporter.java
 D:\vhdl-gui\src\main\java\vdml\io\JsonIO.java
+D:\vhdl-gui\src\main\java\vdml\io\VhdlEntityIO.java
+D:\vhdl-gui\src\main\java\vdml\io\VhdlProjectFileLink.java
+D:\vhdl-gui\src\main\java\vdml\io\VhdlProjectIO.java
+D:\vhdl-gui\src\main\java\vdml\model\ArchitectureDef.java
 D:\vhdl-gui\src\main\java\vdml\model\Block.java
 D:\vhdl-gui\src\main\java\vdml\model\commands\Command.java
 D:\vhdl-gui\src\main\java\vdml\model\DiagramModel.java
@@ -8,6 +12,7 @@ D:\vhdl-gui\src\main\java\vdml\model\EntityDef.java
 D:\vhdl-gui\src\main\java\vdml\model\Port.java
 D:\vhdl-gui\src\main\java\vdml\model\StandardLibrary.java
 D:\vhdl-gui\src\main\java\vdml\model\Wire.java
+D:\vhdl-gui\src\main\java\vdml\ui\ArchitectureEditorDialog.java
 D:\vhdl-gui\src\main\java\vdml\ui\BlockDialog.java
 D:\vhdl-gui\src\main\java\vdml\ui\DiagramCanvas.java
 D:\vhdl-gui\src\main\java\vdml\ui\EntityEditorDialog.java
@@ -15,6 +20,9 @@ D:\vhdl-gui\src\main\java\vdml\ui\Main.java
 D:\vhdl-gui\src\main\java\vdml\ui\TopLevelOptionsPanel.java
 D:\vhdl-gui\src\main\java\vdml\ui\TopLevelPanel.java
 D:\vhdl-gui\src\main\java\vdml\ui\UiUtil.java
+D:\vhdl-gui\src\main\java\vdml\ui\VhdlCodeArea.java
+D:\vhdl-gui\src\main\java\vdml\ui\VhdlLanguageServerSession.java
 D:\vhdl-gui\src\main\java\vdml\validation\DesignValidator.java
+D:\vhdl-gui\src\main\java\vdml\vhdl\GhdlVhdlParser.java
 D:\vhdl-gui\src\main\java\vdml\vhdl\VhdlEmitter.java
 D:\vhdl-gui\src\main\java\vdml\vhdl\VhdlTypeWidths.java

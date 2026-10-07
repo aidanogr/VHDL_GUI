@@ -473,6 +473,11 @@ public final class DesignValidator {
                         standardFile.getValue(), StandardCharsets.UTF_8);
                 files.add(standardFile.getKey());
             }
+            for (Map.Entry<String, String> entityFile : VhdlEmitter.emitEntityArchitectureFiles(model).entrySet()) {
+                Files.writeString(temporaryDirectory.resolve(entityFile.getKey()),
+                        entityFile.getValue(), StandardCharsets.UTF_8);
+                files.add(entityFile.getKey());
+            }
             files.add("design.vhd");
             Path log = temporaryDirectory.resolve("ghdl.log");
             for (String file : files) {
@@ -503,7 +508,7 @@ public final class DesignValidator {
                 }
             }
             pass(findings, "GHDL analysis",
-                    "GHDL analyzed the generated package, standard library components, and structural design.");
+                    "GHDL analyzed the package, standard and custom entity architectures, and structural design.");
         } catch (IOException ex) {
             error(findings, "GHDL analysis", "Could not prepare compiler inputs: " + ex.getMessage());
         } catch (InterruptedException ex) {

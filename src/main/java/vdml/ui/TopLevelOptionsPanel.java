@@ -52,7 +52,7 @@ public class TopLevelOptionsPanel extends JPanel {
         GenericTable() {
             super(new BorderLayout(0, 2));
             setBorder(BorderFactory.createTitledBorder("Generics"));
-            table.setFillsViewportHeight(true);
+            UiUtil.styleTable(table);
             table.setPreferredScrollableViewportSize(new Dimension(240, 66));
             add(new JScrollPane(table), BorderLayout.CENTER);
 
@@ -150,7 +150,7 @@ public class TopLevelOptionsPanel extends JPanel {
             super(new BorderLayout(0, 2));
             this.useClauses = useClauses;
             setBorder(BorderFactory.createTitledBorder(useClauses ? "Package use clauses" : "Library names"));
-            table.setFillsViewportHeight(true);
+            UiUtil.styleTable(table);
             table.setPreferredScrollableViewportSize(new Dimension(240, 66));
             add(new JScrollPane(table), BorderLayout.CENTER);
 

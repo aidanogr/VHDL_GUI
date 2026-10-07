@@ -86,7 +86,7 @@ public class TopLevelPanel extends JPanel {
             super(new BorderLayout(0, 2));
             this.dir = dir;
             setBorder(BorderFactory.createTitledBorder(dir == Direction.IN ? "Inputs" : "Outputs"));
-            table.setFillsViewportHeight(true);
+            UiUtil.styleTable(table);
             table.getColumnModel().getColumn(0).setPreferredWidth(80);
             table.getColumnModel().getColumn(1).setPreferredWidth(170);
             table.addMouseListener(new MouseAdapter() {

@@ -3,7 +3,23 @@ package vdml.model;
 import java.util.List;
 import java.util.stream.Collectors;
 
-public record EntityDef(String name, List<Port> ports, List<String> generics) {
+public record EntityDef(String name, List<Port> ports, List<String> generics,
+                        List<ArchitectureDef> architectures, String sourceOverride) {
+    public EntityDef {
+        ports = ports == null ? List.of() : List.copyOf(ports);
+        generics = generics == null ? List.of() : List.copyOf(generics);
+        architectures = architectures == null ? List.of() : List.copyOf(architectures);
+    }
+
+    public EntityDef(String name, List<Port> ports, List<String> generics,
+                     List<ArchitectureDef> architectures) {
+        this(name, ports, generics, architectures, null);
+    }
+
+    public EntityDef(String name, List<Port> ports, List<String> generics) {
+        this(name, ports, generics, List.of(new ArchitectureDef("rtl", "", "")));
+    }
+
     public List<Port> inputs() {
         return ports == null ? List.of() : ports.stream()
                 .filter(port -> port.dir() == Direction.IN)

@@ -14,6 +14,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.prefs.BackingStoreException;
+import java.util.prefs.Preferences;
 
 import javax.swing.AbstractAction;
 import javax.swing.BorderFactory;
@@ -38,12 +42,18 @@ import javax.swing.JTextArea;
 import javax.swing.KeyStroke;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
+import javax.swing.UnsupportedLookAndFeelException;
+import javax.swing.UIManager;
 import javax.swing.filechooser.FileNameExtensionFilter;
 
 import vdml.io.DiagramPdfExporter;
 import vdml.io.JsonIO;
+import vdml.io.VhdlProjectFileLink;
+import vdml.io.VhdlEntityIO;
+import vdml.io.VhdlProjectIO;
 import vdml.model.DiagramModel;
 import vdml.model.EntityDef;
+import vdml.model.StandardLibrary;
 import vdml.validation.DesignValidator;
 import vdml.validation.DesignValidator.Report;
 import vdml.vhdl.VhdlEmitter;
@@ -55,10 +65,16 @@ import vdml.vhdl.VhdlEmitter;
  * {@link DesignValidator}.
  */
 public class Main {
+    private static final int MAX_RECENT_FILES = 10;
+    private static final String RECENT_FILE_COUNT_KEY = "recentFileCount";
+    private static final String RECENT_FILE_KEY_PREFIX = "recentFile.";
+
     private final DiagramModel model = new DiagramModel();
     private final DiagramCanvas canvas = new DiagramCanvas(model);
     private final JFrame frame = new JFrame("vdml");
+    private final List<File> recentFiles = new ArrayList<>();
     private JSplitPane workspaceSplit;
+    private JMenu recentFilesMenu;
     private JPanel toolsPane;
     private JButton detachToolsButton;
     private JFrame detachedToolsFrame;
@@ -68,6 +84,8 @@ public class Main {
     private long designRevision;
     private Report latestValidationReport;
     private boolean latestReportStale;
+    private String recentFilesLoadError;
+    private VhdlProjectFileLink projectFileLink;
     private static final String HINT =
             "Fan-out: click one output, then multiple inputs; Esc finishes. Move: drag block. "
                     + "Resize: drag selected corner. "
@@ -78,11 +96,28 @@ public class Main {
     private File currentFile;
 
     public static void main(String[] args) {
+        installSystemLookAndFeel();
         SwingUtilities.invokeLater(() -> new Main().show());
     }
 
+    private static void installSystemLookAndFeel() {
+        try {
+            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+        } catch (ClassNotFoundException | InstantiationException | IllegalAccessException
+                | UnsupportedLookAndFeelException ex) {
+            System.err.println("Could not install the system look and feel: " + ex.getMessage());
+        }
+    }
+
     private void show() {
+        loadRecentFiles();
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                closeProjectFileLink();
+            }
+        });
         frame.setJMenuBar(buildMenuBar());
         frame.getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
                 .put(KeyStroke.getKeyStroke(KeyEvent.VK_E, InputEvent.CTRL_DOWN_MASK), "exportVhdl");
@@ -112,12 +147,16 @@ public class Main {
             }
         });
         JButton newEntity = new JButton("New entity…");
-        newEntity.addActionListener(e -> EntityEditorDialog.show(frame, model, null));
+        newEntity.addActionListener(e -> EntityEditorDialog.show(frame, model, null, projectVhdlDirectory()));
         JButton editEntity = new JButton("Edit entity…");
         editEntity.addActionListener(e -> {
             EntityDef def = model.getEntityCatalog().get((String) entities.getSelectedItem());
             if (def != null) {
-                EntityEditorDialog.show(frame, model, def);
+                if (def.sourceOverride() != null) {
+                    error("This component is backed by imported VHDL. Edit its source file and re-import it.");
+                    return;
+                }
+                EntityEditorDialog.show(frame, model, def, projectVhdlDirectory());
             }
         });
         toolsPane = buildToolsPane(entities, add, newEntity, editEntity);
@@ -134,7 +173,8 @@ public class Main {
                 + "To fan out one output, click it once and then click multiple input pins; press Esc to finish. "
                 + "Pan in any direction with the middle mouse button or Space+left-drag. "
                 + "Use the mouse wheel to zoom around the pointer.");
-        canvas.setBlockActivatedListener(block -> BlockDialog.show(frame, model, block));
+        canvas.setBlockActivatedListener(block ->
+                BlockDialog.show(frame, model, block, projectVhdlDirectory()));
         model.addChangeListener(this::modelChanged);
         refreshLiveValidation();
 
@@ -177,6 +217,10 @@ public class Main {
         frame.setVisible(true);
         workspaceSplit.setDividerLocation(0.82);
         SwingUtilities.invokeLater(canvas::showOrigin);
+        if (recentFilesLoadError != null) {
+            error("Could not load recent files: " + recentFilesLoadError);
+            recentFilesLoadError = null;
+        }
     }
 
     private JPanel buildToolsPane(JComboBox<String> entities, JButton add,
@@ -288,15 +332,27 @@ public class Main {
         JMenu file = new JMenu("File");
         file.add(item("New", KeyEvent.VK_N, ctrl, this::newDiagram));
         file.add(item("Open…", KeyEvent.VK_O, ctrl, this::open));
+        recentFilesMenu = new JMenu("Open Recent");
+        refreshRecentFilesMenu();
+        file.add(recentFilesMenu);
         file.add(item("Save…", KeyEvent.VK_S, ctrl, this::save));
         file.addSeparator();
+        file.add(item("Import VHDL entity as component…", 0, 0, this::importEntityAsComponent));
+        file.add(item("Import VHDL directory as components…", 0, 0, this::importVhdlDirectory));
+        file.add(item("Import VHDL interface as top level…", 0, 0, this::importTopLevelInterface));
+        file.add(item("Export entity…", 0, 0, this::exportEntity));
+        file.addSeparator();
         file.add(item("Export PDF…", KeyEvent.VK_P, ctrl | InputEvent.SHIFT_DOWN_MASK, this::exportPdf));
+        file.add(item("Export VHDL files…", KeyEvent.VK_E, ctrl, this::exportVhdl));
         file.addSeparator();
         file.add(item("Exit", 0, 0, () -> System.exit(0)));
 
         JMenu edit = new JMenu("Edit");
         edit.add(item("Undo", KeyEvent.VK_Z, ctrl, model::undo));
         edit.add(item("Redo", KeyEvent.VK_Y, ctrl, model::redo));
+        edit.addSeparator();
+        edit.add(item("Top-level architecture code…", 0, 0,
+                () -> ArchitectureEditorDialog.editTopLevel(frame, model, projectVhdlDirectory())));
 
         JMenu dev = new JMenu("Dev");
         JCheckBoxMenuItem liveValidation = new JCheckBoxMenuItem("Live validation", true);
@@ -314,6 +370,8 @@ public class Main {
         dev.add(item("Validate now…", 0, 0, this::validateNow));
         dev.add(item("Show latest report…", 0, 0, this::showLatestReport));
         dev.add(item("Save latest report…", 0, 0, this::saveLatestReport));
+        dev.addSeparator();
+        dev.add(item("Configure VHDL language server…", 0, 0, this::configureVhdlLanguageServer));
 
         JMenuBar bar = new JMenuBar();
         bar.add(file);
@@ -332,8 +390,9 @@ public class Main {
     }
 
     private void newDiagram() {
-        model.loadFrom(new DiagramModel());
+        closeProjectFileLink();
         currentFile = null;
+        model.loadFrom(new DiagramModel());
         frame.setTitle("vdml");
     }
 
@@ -342,14 +401,38 @@ public class Main {
         if (chooser.showOpenDialog(frame) != JFileChooser.APPROVE_OPTION) {
             return;
         }
-        File file = chooser.getSelectedFile();
+        openFile(chooser.getSelectedFile());
+    }
+
+    private void openFile(File selectedFile) {
+        File file = selectedFile.getAbsoluteFile();
+        DiagramModel loaded;
         try {
-            String json = Files.readString(file.toPath(), StandardCharsets.UTF_8);
-            model.loadFrom(JsonIO.load(json));
-            currentFile = file;
-            frame.setTitle("vdml - " + file.getName());
+            loaded = VhdlProjectIO.isProjectFile(file.toPath())
+                    ? VhdlProjectIO.load(file.toPath())
+                    : JsonIO.load(Files.readString(file.toPath(), StandardCharsets.UTF_8));
         } catch (IOException | RuntimeException ex) {
             error("Could not open " + file.getName() + ": " + ex.getMessage());
+            return;
+        }
+        closeProjectFileLink();
+        currentFile = null;
+        model.loadFrom(loaded);
+        currentFile = file;
+        frame.setTitle("vdml - " + file.getName());
+        rememberRecentFile(file);
+        if (VhdlProjectIO.isProjectFile(file.toPath())) {
+            try {
+                VhdlProjectIO.save(file.toPath(), model);
+            } catch (IOException ex) {
+                error("Project opened, but linked VHDL files could not be synchronized: " + ex.getMessage());
+                return;
+            }
+            try {
+                watchProjectFiles();
+            } catch (IOException ex) {
+                error("Project opened, but linked VHDL changes could not be watched: " + ex.getMessage());
+            }
         }
     }
 
@@ -362,22 +445,178 @@ public class Main {
             return;
         }
         File file = chooser.getSelectedFile();
-        if (!file.getName().contains(".")) {
-            file = new File(file.getParentFile(), file.getName() + ".dgm.json");
+        String lowerName = file.getName().toLowerCase(java.util.Locale.ROOT);
+        if (!lowerName.endsWith(VhdlProjectIO.PROJECT_EXTENSION) && selectedProjectFilter(chooser)) {
+            file = new File(file.getParentFile(), file.getName() + VhdlProjectIO.PROJECT_EXTENSION);
+        } else if (!lowerName.endsWith(VhdlProjectIO.PROJECT_EXTENSION)
+                && !selectedProjectFilter(chooser) && !lowerName.endsWith(".json")) {
+            String extension = ".dgm.json";
+            file = new File(file.getParentFile(), file.getName() + extension);
         }
+        file = file.getAbsoluteFile();
         try {
-            Files.writeString(file.toPath(), JsonIO.save(model), StandardCharsets.UTF_8);
+            boolean projectFile = VhdlProjectIO.isProjectFile(file.toPath());
+            if (projectFile) {
+                VhdlProjectIO.save(file.toPath(), model);
+            } else {
+                Files.writeString(file.toPath(), JsonIO.save(model), StandardCharsets.UTF_8);
+            }
+            if (!projectFile || currentFile == null || !sameFile(currentFile, file)) {
+                closeProjectFileLink();
+            }
             currentFile = file;
+            if (projectFile && projectFileLink == null) {
+                try {
+                    watchProjectFiles();
+                } catch (IOException ex) {
+                    error("Project saved, but linked VHDL changes could not be watched: " + ex.getMessage());
+                }
+            }
             frame.setTitle("vdml - " + file.getName());
+            rememberRecentFile(file);
         } catch (IOException ex) {
             error("Could not save: " + ex.getMessage());
         }
     }
 
+    private void loadRecentFiles() {
+        try {
+            Preferences preferences = Preferences.userNodeForPackage(Main.class);
+            int count = Math.min(MAX_RECENT_FILES, Math.max(0, preferences.getInt(RECENT_FILE_COUNT_KEY, 0)));
+            for (int i = count - 1; i >= 0; i--) {
+                String path = preferences.get(RECENT_FILE_KEY_PREFIX + i, null);
+                if (path != null && !path.isBlank()) {
+                    addRecentFileInMemory(new File(path));
+                }
+            }
+        } catch (SecurityException ex) {
+            recentFilesLoadError = ex.getMessage();
+        }
+    }
+
+    private void rememberRecentFile(File file) {
+        addRecentFileInMemory(file);
+        persistRecentFiles();
+        refreshRecentFilesMenu();
+    }
+
+    private void addRecentFileInMemory(File file) {
+        File normalized = file.toPath().toAbsolutePath().normalize().toFile();
+        recentFiles.removeIf(recent -> sameFile(recent, normalized));
+        recentFiles.add(0, normalized);
+        while (recentFiles.size() > MAX_RECENT_FILES) {
+            recentFiles.remove(recentFiles.size() - 1);
+        }
+    }
+
+    private boolean sameFile(File first, File second) {
+        return first.toPath().toAbsolutePath().normalize()
+                .equals(second.toPath().toAbsolutePath().normalize());
+    }
+
+    private void persistRecentFiles() {
+        try {
+            Preferences preferences = Preferences.userNodeForPackage(Main.class);
+            preferences.putInt(RECENT_FILE_COUNT_KEY, recentFiles.size());
+            for (int i = 0; i < MAX_RECENT_FILES; i++) {
+                String key = RECENT_FILE_KEY_PREFIX + i;
+                if (i < recentFiles.size()) {
+                    preferences.put(key, recentFiles.get(i).getAbsolutePath());
+                } else {
+                    preferences.remove(key);
+                }
+            }
+            preferences.flush();
+        } catch (BackingStoreException | SecurityException ex) {
+            error("Could not save recent files: " + ex.getMessage());
+        }
+    }
+
+    private void refreshRecentFilesMenu() {
+        if (recentFilesMenu == null) {
+            return;
+        }
+        recentFilesMenu.removeAll();
+        if (recentFiles.isEmpty()) {
+            JMenuItem empty = new JMenuItem("No recent files");
+            empty.setEnabled(false);
+            recentFilesMenu.add(empty);
+            return;
+        }
+        for (File file : recentFiles) {
+            JMenuItem recent = new JMenuItem(recentFileLabel(file));
+            recent.setToolTipText(file.getAbsolutePath());
+            recent.addActionListener(e -> openFile(file));
+            recentFilesMenu.add(recent);
+        }
+    }
+
+    private String recentFileLabel(File file) {
+        int duplicateNames = 0;
+        for (File recent : recentFiles) {
+            if (recent.getName().equals(file.getName())) {
+                duplicateNames++;
+            }
+        }
+        if (duplicateNames > 1) {
+            return file.getName() + " — " + file.getParent();
+        }
+        return file.getName();
+    }
+
     private JFileChooser createDiagramFileChooser() {
         JFileChooser chooser = new JFileChooser(currentFile == null ? new File(".") : currentFile.getParentFile());
         chooser.setFileFilter(new FileNameExtensionFilter("Diagram (*.dgm.json, *.json)", "json"));
+        chooser.addChoosableFileFilter(new FileNameExtensionFilter(
+                "vdml project (*.vdmlproj)", "vdmlproj"));
         return chooser;
+    }
+
+    private Path projectVhdlDirectory() {
+        if (currentFile == null || !VhdlProjectIO.isProjectFile(currentFile.toPath())) {
+            return null;
+        }
+        return VhdlProjectIO.sourceDirectory(currentFile.toPath());
+    }
+
+    private void configureVhdlLanguageServer() {
+        String current = VhdlLanguageServerSession.configuredExecutable();
+        String entered = JOptionPane.showInputDialog(frame,
+                "Enter the VHDL language-server executable (for example, vhdl_ls).\n"
+                        + "Leave blank to auto-detect vhdl_ls on PATH; GHDL remains available as fallback.",
+                current);
+        if (entered == null) {
+            return;
+        }
+        try {
+            VhdlLanguageServerSession.setConfiguredExecutable(entered);
+        } catch (SecurityException ex) {
+            error("Could not save language-server settings: " + ex.getMessage());
+        }
+    }
+
+    private boolean selectedProjectFilter(JFileChooser chooser) {
+        if (!(chooser.getFileFilter() instanceof FileNameExtensionFilter filter)) {
+            return false;
+        }
+        for (String extension : filter.getExtensions()) {
+            if (extension.equalsIgnoreCase("vdmlproj")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void watchProjectFiles() throws IOException {
+        projectFileLink = new VhdlProjectFileLink(currentFile.toPath(), model, this::error);
+    }
+
+    private void closeProjectFileLink() {
+        if (projectFileLink == null) {
+            return;
+        }
+        projectFileLink.close();
+        projectFileLink = null;
     }
 
     private void emitToStdout() {
@@ -390,6 +629,10 @@ public class Main {
         System.out.println("-- components_pkg.vhd\n" + pkg);
         StringBuilder generated = new StringBuilder(pkg).append('\n');
         for (var file : VhdlEmitter.emitStandardLibraryFiles(model).entrySet()) {
+            System.out.println("-- " + file.getKey() + "\n" + file.getValue());
+            generated.append(file.getValue()).append('\n');
+        }
+        for (var file : VhdlEmitter.emitEntityArchitectureFiles(model).entrySet()) {
             System.out.println("-- " + file.getKey() + "\n" + file.getValue());
             generated.append(file.getValue()).append('\n');
         }
@@ -421,6 +664,197 @@ public class Main {
         }
     }
 
+    private void importEntityAsComponent() {
+        JFileChooser chooser = createVhdlImportChooser();
+        if (chooser.showOpenDialog(frame) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        try {
+            EntityDef imported = VhdlEntityIO.readEntity(chooser.getSelectedFile().toPath());
+            EntityDef existing = findEntityIgnoreCase(imported.name());
+            String oldName = null;
+            if (existing != null) {
+                int replace = JOptionPane.showConfirmDialog(frame,
+                        "Replace catalogue entity " + existing.name() + " with the imported interface?",
+                        "Replace entity", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                if (replace != JOptionPane.YES_OPTION) {
+                    return;
+                }
+                oldName = existing.name();
+            }
+            String problem = model.defineEntity(oldName, imported);
+            if (problem != null) {
+                error("Could not import entity: " + problem);
+                return;
+            }
+            statusBar.setText("Imported " + imported.name() + " as a reusable component");
+        } catch (IOException | RuntimeException ex) {
+            error("Could not import VHDL entity: " + ex.getMessage());
+        }
+    }
+
+    private void importTopLevelInterface() {
+        JFileChooser chooser = createVhdlImportChooser();
+        if (chooser.showOpenDialog(frame) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        try {
+            EntityDef imported = VhdlEntityIO.readEntity(chooser.getSelectedFile().toPath());
+            boolean topWiresExist = model.getWires().stream()
+                    .anyMatch(wire -> wire.fromBlock().equals(DiagramModel.TOP_ID)
+                            || wire.toBlock().equals(DiagramModel.TOP_ID));
+            if (topWiresExist && !model.getTopPorts().equals(imported.ports())) {
+                int replace = JOptionPane.showConfirmDialog(frame,
+                        "Changing the top-level interface may remove wires connected to ports that no longer match. "
+                                + "Continue?",
+                        "Replace top-level interface", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                if (replace != JOptionPane.YES_OPTION) {
+                    return;
+                }
+            }
+            String problem = model.importTopInterface(imported);
+            if (problem != null) {
+                error("Could not import top-level interface: " + problem);
+                return;
+            }
+            statusBar.setText("Imported top-level interface " + imported.name());
+        } catch (IOException | RuntimeException ex) {
+            error("Could not import VHDL interface: " + ex.getMessage());
+        }
+    }
+
+    private void importVhdlDirectory() {
+        File start = currentFile == null ? new File(".") : currentFile.getAbsoluteFile().getParentFile();
+        JFileChooser chooser = new JFileChooser(start);
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setDialogTitle("Choose a VHDL export directory");
+        if (chooser.showOpenDialog(frame) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        try {
+            List<EntityDef> imported = VhdlEntityIO.readEntities(chooser.getSelectedFile().toPath()).stream()
+                    .filter(entity -> !StandardLibrary.contains(entity.name()))
+                    .toList();
+            if (imported.isEmpty()) {
+                error("The selected directory contains no importable VHDL entities.");
+                return;
+            }
+            EntityDef topNameConflict = imported.stream()
+                    .filter(entity -> entity.name().equalsIgnoreCase(model.getTopEntity()))
+                    .findFirst().orElse(null);
+            if (topNameConflict != null) {
+                error("Cannot import " + topNameConflict.name()
+                        + " as a component because it is the current top-level entity.");
+                return;
+            }
+            List<String> replacements = imported.stream()
+                    .map(entity -> findEntityIgnoreCase(entity.name()))
+                    .filter(java.util.Objects::nonNull)
+                    .map(EntityDef::name)
+                    .toList();
+            if (!replacements.isEmpty()) {
+                int replace = JOptionPane.showConfirmDialog(frame,
+                        "Replace these catalogue entities?\n" + String.join(", ", replacements),
+                        "Replace imported entities", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                if (replace != JOptionPane.YES_OPTION) {
+                    return;
+                }
+            }
+
+            int applied = 0;
+            for (EntityDef entity : imported) {
+                EntityDef existing = findEntityIgnoreCase(entity.name());
+                String problem = model.defineEntity(existing == null ? null : existing.name(), entity);
+                if (problem != null) {
+                    while (applied-- > 0) {
+                        model.undo();
+                    }
+                    error("Could not import VHDL directory: " + problem);
+                    return;
+                }
+                applied++;
+            }
+            statusBar.setText("Imported " + imported.size() + " VHDL entities as components");
+        } catch (IOException | RuntimeException ex) {
+            error("Could not import VHDL directory: " + ex.getMessage());
+        }
+    }
+
+    private void exportEntity() {
+        String topChoice = "Top-level: " + model.getTopEntity();
+        List<String> choices = new ArrayList<>();
+        choices.add(topChoice);
+        model.getEntityCatalog().values().stream()
+                .filter(entity -> !StandardLibrary.contains(entity.name()))
+                .map(EntityDef::name)
+                .forEach(choices::add);
+        Object selected = JOptionPane.showInputDialog(frame, "Choose the top-level entity or a custom component:",
+                "Export entity", JOptionPane.PLAIN_MESSAGE, null,
+                choices.toArray(), topChoice);
+        if (!(selected instanceof String selection)) {
+            return;
+        }
+        String entityName;
+        String source;
+        if (selection.equals(topChoice)) {
+            entityName = model.getTopEntity();
+            source = VhdlEmitter.emitStructuralArchitecture(model);
+        } else {
+            EntityDef entity = model.getEntityCatalog().get(selection);
+            if (entity == null) {
+                error("The selected entity is no longer in the catalogue.");
+                return;
+            }
+            entityName = entity.name();
+            source = VhdlEmitter.emitEntityArchitectureFile(model, entity);
+        }
+        JFileChooser chooser = new JFileChooser(currentFile == null
+                ? new File(".") : currentFile.getAbsoluteFile().getParentFile());
+        chooser.setDialogTitle("Export entity " + entityName);
+        chooser.setFileFilter(new FileNameExtensionFilter("VHDL source (*.vhd)", "vhd"));
+        chooser.setSelectedFile(new File(entityName + ".vhd"));
+        if (chooser.showSaveDialog(frame) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        File output = ensureVhdlExtension(chooser.getSelectedFile());
+        if (output.exists()) {
+            int replace = JOptionPane.showConfirmDialog(frame,
+                    "Replace " + output.getName() + "?", "Confirm export",
+                    JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (replace != JOptionPane.YES_OPTION) {
+                return;
+            }
+        }
+        try {
+            Files.writeString(output.toPath(), source, StandardCharsets.UTF_8);
+            statusBar.setText("Exported " + entityName + " to " + output.getName());
+        } catch (IOException ex) {
+            error("Could not export entity: " + ex.getMessage());
+        }
+    }
+
+    private JFileChooser createVhdlImportChooser() {
+        File start = currentFile == null ? new File(".") : currentFile.getAbsoluteFile().getParentFile();
+        JFileChooser chooser = new JFileChooser(start);
+        chooser.setDialogTitle("Import VHDL entity");
+        chooser.setFileFilter(new FileNameExtensionFilter("VHDL source (*.vhd, *.vhdl)", "vhd", "vhdl"));
+        return chooser;
+    }
+
+    private EntityDef findEntityIgnoreCase(String name) {
+        return model.getEntityCatalog().values().stream()
+                .filter(entity -> entity.name().equalsIgnoreCase(name))
+                .findFirst().orElse(null);
+    }
+
+    private File ensureVhdlExtension(File file) {
+        String name = file.getName().toLowerCase(java.util.Locale.ROOT);
+        if (name.endsWith(".vhd") || name.endsWith(".vhdl")) {
+            return file;
+        }
+        return new File(file.getParentFile(), file.getName() + ".vhd");
+    }
+
     private JFileChooser createVhdlExportChooser() {
         JFileChooser chooser = new JFileChooser(currentFile == null ? new File(".") : currentFile.getParentFile());
         chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
@@ -435,12 +869,17 @@ public class Main {
         for (var file : standardFiles.entrySet()) {
             Files.writeString(dir.resolve(file.getKey()), file.getValue(), StandardCharsets.UTF_8);
         }
+        var entityFiles = VhdlEmitter.emitEntityArchitectureFiles(model);
+        for (var file : entityFiles.entrySet()) {
+            Files.writeString(dir.resolve(file.getKey()), file.getValue(), StandardCharsets.UTF_8);
+        }
         Files.writeString(dir.resolve(model.getTopEntity() + ".vhd"),
                 VhdlEmitter.emitStructuralArchitecture(model), StandardCharsets.UTF_8);
-        String standardSummary = standardFiles.isEmpty() ? "" : " plus "
-                + standardFiles.size() + " standard library source file(s)";
+        int sourceFileCount = standardFiles.size() + entityFiles.size();
+        String sourceSummary = sourceFileCount == 0 ? "" : " plus "
+                + sourceFileCount + " component source file(s)";
         JOptionPane.showMessageDialog(frame, "Wrote components_pkg.vhd and " + model.getTopEntity()
-                + ".vhd" + standardSummary + " to\n" + dir);
+                + ".vhd" + sourceSummary + " to\n" + dir);
     }
 
     private void exportPdf() {
@@ -480,6 +919,20 @@ public class Main {
             refreshLiveValidation();
         } else if (latestReportStale) {
             validationStatus.setText("Live validation paused (report is stale)");
+        }
+        synchronizeLinkedProject();
+    }
+
+    private void synchronizeLinkedProject() {
+        if (currentFile == null || !VhdlProjectIO.isProjectFile(currentFile.toPath())) {
+            return;
+        }
+        try {
+            VhdlProjectIO.save(currentFile.toPath(), model);
+            validationStatus.setToolTipText(null);
+        } catch (IOException ex) {
+            validationStatus.setText("Project sync failed");
+            validationStatus.setToolTipText(ex.getMessage());
         }
     }
 

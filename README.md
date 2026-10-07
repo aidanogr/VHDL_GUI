@@ -4,12 +4,18 @@ A Swing editor for constructing structural VHDL designs as block diagrams.
 
 ## Build and run
 
-Requires Java 17 or newer and Maven.
+Requires Java 17 or newer and Maven to build. Build a standalone executable JAR
+with all Java dependencies bundled:
 
 ```powershell
-mvn compile
-java -cp target\classes vdml.ui.Main
+mvn package
+java -jar target\vdml-1.0.0-standalone.jar
 ```
+
+Copy `target\vdml-1.0.0-standalone.jar` to another computer with Java 17 or
+newer; Maven and separate Java dependency downloads are not required there.
+Optional external tools and the bundled library list are documented in
+[DEPENDENCIES.md](./DEPENDENCIES.md).
 
 ## Using the editor
 
@@ -38,8 +44,9 @@ java -cp target\classes vdml.ui.Main
   moving endpoint blocks carries manual route bends with them. Dragging near the
   canvas edge scrolls the view to make room.
 - Keep clicking input pins after the first connection to fan one output out to
-  multiple sinks. The connections share one signal; press Escape or click empty
-  space when finished.
+  multiple sinks. A dot marks the shared output when it drives multiple sinks.
+  The connections share one signal; press Escape or click empty space when
+  finished.
 - Drag an interior horizontal or vertical wire segment to adjust the route.
   Drag a signal label to reposition it; double-click it to rename the signal.
   Right-click a wire for **Resize…**, **Add breakpoint here**, and signal options.
@@ -66,9 +73,30 @@ java -cp target\classes vdml.ui.Main
   returns to 100%; wheel zoom keeps the point under the cursor in view.
 - Select a wire or block and press Delete to remove it. Ctrl+Z/Ctrl+Y undo and
   redo model changes.
-- Save/Open use `.dgm.json` sidecars. **Export VHDL files…** writes
-  `components_pkg.vhd`, the top-level entity/architecture file, and VHDL source
-  files for each standard library block used in the diagram.
+- Save/Open support `.dgm.json` diagrams and `.vdmlproj` projects. A project keeps
+  its manifest beside a `vhdl` directory containing `components_pkg.vhd`, the
+  top-level source, and one source file per custom entity. Changes made in the
+  marked user-code regions of those VHDL files are imported into the schematic;
+  diagram edits regenerate the linked files. **Open Recent** lists up to ten
+  successfully opened or saved diagrams/projects across app launches.
+  Use **File → Import VHDL entity as component…** to add a one-entity VHDL source
+  file to the block catalogue. Use **Import VHDL directory as components…** on
+  an **Export VHDL files…** output directory to import its entities and
+  implementations together. **Import VHDL interface as top level…** uses one
+  entity's ports and generics for the current design. Imported component source
+  is retained when saving and exporting the project. **Export entity…** writes
+  one selected entity (including the current top level); **Export VHDL files…**
+  continues to export the complete design. Imported interfaces currently
+  support `in`/`out` ports without port defaults; `inout`, `buffer`, and
+  `linkage` ports are reported as unsupported rather than silently converted.
+  The architecture editor includes VHDL highlighting, Vim-style keybindings,
+  and GHDL syntax diagnostics. Configure an optional stdio VHDL language server
+  from **Dev → Configure VHDL language server…** for additional LSP diagnostics;
+  leaving the executable blank keeps the built-in checker active.
+  **Export VHDL files…**
+  writes `components_pkg.vhd`, the top-level entity/architecture file, and the
+  VHDL source files for each standard-library block and custom entity used in
+  the diagram.
 - **Export PDF…** in the File menu or Design tools pane saves a fitted,
   single-page PDF of the diagram.
 - The **Dev** menu runs design validation. Live checks refresh after edits and

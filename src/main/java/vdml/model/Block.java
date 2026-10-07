@@ -11,6 +11,7 @@ public class Block {
     private String id;
     private String entityName;
     private String instanceLabel;
+    private String architectureName;
     private final Map<String, String> generics = new LinkedHashMap<>();
     private int x;
     private int y;
@@ -65,6 +66,14 @@ public class Block {
         this.instanceLabel = instanceLabel;
     }
 
+    public String getArchitectureName() {
+        return architectureName;
+    }
+
+    public void setArchitectureName(String architectureName) {
+        this.architectureName = architectureName;
+    }
+
     public Map<String, String> getGenerics() {
         return generics;
     }
@@ -110,6 +119,7 @@ public class Block {
     public Block copy() {
         Block copy = new Block(id, entityName, instanceLabel, x, y);
         copy.generics.putAll(generics);
+        copy.architectureName = architectureName;
         copy.setSize(width, height);
         return copy;
     }
